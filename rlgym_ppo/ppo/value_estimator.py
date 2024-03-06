@@ -5,9 +5,10 @@ Author: Matthew Allen
 Description:
     An implementation of a feed-forward neural network which models the value function of a policy.
 """
-import torch.nn as nn
-import torch
+
 import numpy as np
+import torch
+import torch.nn as nn
 
 
 class ValueEstimator(nn.Module):
@@ -15,12 +16,19 @@ class ValueEstimator(nn.Module):
         super().__init__()
         self.device = device
 
-        assert len(layer_sizes) != 0, "AT LEAST ONE LAYER MUST BE SPECIFIED TO BUILD THE NEURAL NETWORK!"
-        layers = [nn.Linear(input_shape, layer_sizes[0]), nn.ReLU()]
+        assert (
+            len(layer_sizes) != 0
+        ), "AT LEAST ONE LAYER MUST BE SPECIFIED TO BUILD THE NEURAL NETWORK!"
+        layers = [
+            nn.Linear(input_shape, layer_sizes[0]),
+            nn.LayerNorm(layer_sizes[0]),
+            nn.ReLU(),
+        ]  # Added LayerNorm
 
         prev_size = layer_sizes[0]
         for size in layer_sizes[1:]:
             layers.append(nn.Linear(prev_size, size))
+            layers.append(nn.LayerNorm(size))  # Added LayerNorm
             layers.append(nn.ReLU())
             prev_size = size
 

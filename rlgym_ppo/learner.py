@@ -13,22 +13,22 @@ import os
 import random
 import shutil
 import time
-from typing import Callable, Union, Tuple
+from typing import Callable, Tuple, Union
 
 import numpy as np
 import torch
 import wandb
-from wandb.wandb_run import Run
 from rlgym_sim import gym
+from wandb.wandb_run import Run
 
 from rlgym_ppo.batched_agents import BatchedAgentManager
 from rlgym_ppo.ppo import ExperienceBuffer, PPOLearner
-from rlgym_ppo.util import WelfordRunningStat, reporting, torch_functions, KBHit
+from rlgym_ppo.util import KBHit, WelfordRunningStat, reporting, torch_functions
 
 
 class Learner(object):
     def __init__(
-            # fmt: off
+        # fmt: off
             self,
             env_create_function: Callable[..., gym.Gym],
             metrics_logger=None,
@@ -76,10 +76,11 @@ class Learner(object):
             random_seed: int = 123,
             n_checkpoints_to_keep: int = 5,
             shm_buffer_size: int = 8192,
-            device: str = "auto"):
+            device: str = "auto"
+    ):
 
         assert (
-                env_create_function is not None
+            env_create_function is not None
         ), "MUST PROVIDE A FUNCTION TO CREATE RLGYM FUNCTIONS TO INITIALIZE RLGYM-PPO"
 
         if checkpoints_save_folder is None:
@@ -126,12 +127,15 @@ class Learner(object):
         )
 
         print("Initializing processes...")
-        collect_metrics_fn = None if metrics_logger is None else self.metrics_logger.collect_metrics
+        collect_metrics_fn = (
+            None if metrics_logger is None else self.metrics_logger.collect_metrics
+        )
         self.agent = BatchedAgentManager(
-            None, min_inference_size=min_inference_size,
+            None,
+            min_inference_size=min_inference_size,
             seed=random_seed,
             standardize_obs=standardize_obs,
-            steps_per_obs_stats_increment=steps_per_obs_stats_increment
+            steps_per_obs_stats_increment=steps_per_obs_stats_increment,
         )
         obs_space_size, act_space_size, action_space_type = self.agent.init_processes(
             n_processes=n_proc,
@@ -140,7 +144,7 @@ class Learner(object):
             spawn_delay=instance_launch_delay,
             render=render,
             render_delay=render_delay,
-            shm_buffer_size=shm_buffer_size
+            shm_buffer_size=shm_buffer_size,
         )
         obs_space_size = np.prod(obs_space_size)
         print("Initializing PPO...")
@@ -189,7 +193,9 @@ class Learner(object):
         }
 
         self.wandb_run = wandb_run
-        wandb_loaded = checkpoint_load_folder is not None and self.load(checkpoint_load_folder, load_wandb, policy_lr, critic_lr)
+        wandb_loaded = checkpoint_load_folder is not None and self.load(
+            checkpoint_load_folder, load_wandb, policy_lr, critic_lr
+        )
 
         if log_to_wandb and self.wandb_run is None and not wandb_loaded:
             project = "rlgym-ppo" if wandb_project_name is None else wandb_project_name
@@ -197,7 +203,11 @@ class Learner(object):
             run_name = "rlgym-ppo-run" if wandb_run_name is None else wandb_run_name
             print("Attempting to create new wandb run...")
             self.wandb_run = wandb.init(
-                project=project, group=group, config=self.config, name=run_name, reinit=True
+                project=project,
+                group=group,
+                config=self.config,
+                name=run_name,
+                reinit=True,
             )
             print("Created new wandb run!", self.wandb_run.id)
         print("Learner successfully initialized!")
@@ -206,13 +216,13 @@ class Learner(object):
         if new_policy_lr is not None:
             self.policy_lr = new_policy_lr
             for param_group in self.ppo_learner.policy_optimizer.param_groups:
-                param_group['lr'] = new_policy_lr
+                param_group["lr"] = new_policy_lr
             print(f"New policy learning rate: {new_policy_lr}")
 
         if new_critic_lr is not None:
             self.critic_lr = new_critic_lr
             for param_group in self.ppo_learner.value_optimizer.param_groups:
-                param_group['lr'] = new_critic_lr
+                param_group["lr"] = new_critic_lr
             print(f"New policy learning rate: {new_policy_lr}")
 
     def learn(self):
@@ -245,7 +255,9 @@ class Learner(object):
 
         # Class to watch for keyboard hits
         kb = KBHit()
-        print("Press (p) to pause (c) to checkpoint, (q) to checkpoint and quit (after next iteration)\n")
+        print(
+            "Press (p) to pause (c) to checkpoint, (q) to checkpoint and quit (after next iteration)\n"
+        )
 
         # While the number of timesteps we have collected so far is less than the
         # amount we are allowed to collect.
@@ -254,12 +266,14 @@ class Learner(object):
             report = {}
 
             # Collect the desired number of timesteps from our agent.
-            experience, collected_metrics, steps_collected, collection_time = self.agent.collect_timesteps(
-                self.ts_per_epoch
+            experience, collected_metrics, steps_collected, collection_time = (
+                self.agent.collect_timesteps(self.ts_per_epoch)
             )
 
             if self.metrics_logger is not None:
-                self.metrics_logger.report_metrics(collected_metrics, self.wandb_run, self.agent.cumulative_timesteps)
+                self.metrics_logger.report_metrics(
+                    collected_metrics, self.wandb_run, self.agent.cumulative_timesteps
+                )
 
             # Add the new experience to our buffer and compute the various
             # reinforcement learning quantities we need to
@@ -291,9 +305,9 @@ class Learner(object):
                 report["Policy Reward"] = np.nan
 
             # Log to wandb and print to the console.
-            reporting.report_metrics(loggable_metrics=report,
-                                     debug_metrics=None,
-                                     wandb_run=self.wandb_run)
+            reporting.report_metrics(
+                loggable_metrics=report, debug_metrics=None, wandb_run=self.wandb_run
+            )
 
             report.clear()
             ppo_report.clear()
@@ -308,16 +322,16 @@ class Learner(object):
 
             if kb.kbhit():
                 c = kb.getch()
-                if c == 'p':  # pause
+                if c == "p":  # pause
                     print("Paused, press any key to resume")
                     while True:
                         if kb.kbhit():
                             break
-                if c in ('c', 'q'):
+                if c in ("c", "q"):
                     self.save(self.agent.cumulative_timesteps)
-                if c == 'q':
+                if c == "q":
                     return
-                if c in ('c', 'p'):
+                if c in ("c", "p"):
                     print("Resuming...\n")
 
             # Save if we've reached the next checkpoint timestep.
@@ -423,7 +437,6 @@ class Learner(object):
             "epoch": self.epoch,
             "ts_since_last_save": self.ts_since_last_save,
             "reward_running_stats": self.return_stats.to_json(),
-
         }
         if self.agent.standardize_obs:
             book_keeping_vars["obs_running_stats"] = self.agent.obs_stats.to_json()
@@ -470,14 +483,20 @@ class Learner(object):
             ]
             self.return_stats.from_json(book_keeping_vars["reward_running_stats"])
 
-            if self.agent.standardize_obs and "obs_running_stats" in book_keeping_vars.keys():
+            if (
+                self.agent.standardize_obs
+                and "obs_running_stats" in book_keeping_vars.keys()
+            ):
                 self.agent.obs_stats = WelfordRunningStat(1)
                 self.agent.obs_stats.from_json(book_keeping_vars["obs_running_stats"])
-            if self.standardize_returns and "reward_running_stats" in book_keeping_vars.keys():
+            if (
+                self.standardize_returns
+                and "reward_running_stats" in book_keeping_vars.keys()
+            ):
                 self.return_stats.from_json(book_keeping_vars["reward_running_stats"])
 
             self.epoch = book_keeping_vars["epoch"]
-            
+
             # Update learning rates if new values are provided
             if new_policy_lr is not None or new_critic_lr is not None:
                 self.update_learning_rate(new_policy_lr, new_critic_lr)
