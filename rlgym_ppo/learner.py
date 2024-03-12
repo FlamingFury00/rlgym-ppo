@@ -28,57 +28,49 @@ from rlgym_ppo.util import KBHit, WelfordRunningStat, reporting, torch_functions
 
 class Learner(object):
     def __init__(
-        # fmt: off
-            self,
-            env_create_function: Callable[..., gym.Gym],
-            metrics_logger=None,
-            n_proc: int = 8,
-            min_inference_size: int = 80,
-            render: bool = False,
-            render_delay: float = 0,
-
-            timestep_limit: int = 5_000_000_000,
-            exp_buffer_size: int = 100000,
-            ts_per_iteration: int = 50000,
-            standardize_returns: bool = True,
-            standardize_obs: bool = True,
-            max_returns_per_stats_increment: int = 150,
-            steps_per_obs_stats_increment: int = 5,
-
-            policy_layer_sizes: Tuple[int, ...] = (256, 256, 256),
-            critic_layer_sizes: Tuple[int, ...] = (256, 256, 256),
-            continuous_var_range: Tuple[float, ...] = (0.1, 1.0),
-
-            ppo_epochs: int = 10,
-            ppo_batch_size: int = 50000,
-            ppo_minibatch_size: Union[int, None] = None,
-            ppo_ent_coef: float = 0.005,
-            ppo_clip_range: float = 0.2,
-
-            gae_lambda: float = 0.95,
-            gae_gamma: float = 0.99,
-            policy_lr: float = 3e-4,
-            critic_lr: float = 3e-4,
-
-            log_to_wandb: bool = False,
-            load_wandb: bool = True,
-            wandb_run: Union[Run, None] = None,
-            wandb_project_name: Union[str, None] = None,
-            wandb_group_name: Union[str, None] = None,
-            wandb_run_name: Union[str, None] = None,
-
-            checkpoints_save_folder: Union[str, None] = None,
-            add_unix_timestamp: bool = True,
-            checkpoint_load_folder: Union[str, None] = None,
-            save_every_ts: int = 1_000_000,
-
-            instance_launch_delay: Union[float, None] = None,
-            random_seed: int = 123,
-            n_checkpoints_to_keep: int = 5,
-            shm_buffer_size: int = 8192,
-            device: str = "auto"
+        self,
+        env_create_function: Callable[..., gym.Gym],
+        metrics_logger: Union[None, object] = None,
+        n_proc: int = 8,
+        min_inference_size: int = 80,
+        render: bool = False,
+        render_delay: float = 0,
+        timestep_limit: int = 5_000_000_000,
+        exp_buffer_size: int = 100000,
+        ts_per_iteration: int = 50000,
+        standardize_returns: bool = True,
+        standardize_obs: bool = True,
+        max_returns_per_stats_increment: int = 150,
+        steps_per_obs_stats_increment: int = 5,
+        policy_layer_sizes: Tuple[int, ...] = (256, 256, 256),
+        critic_layer_sizes: Tuple[int, ...] = (256, 256, 256),
+        continuous_var_range: Tuple[float, ...] = (0.1, 1.0),
+        ppo_epochs: int = 10,
+        ppo_batch_size: int = 50000,
+        ppo_minibatch_size: Union[int, None] = None,
+        ppo_ent_coef: float = 0.005,
+        ppo_clip_range: float = 0.2,
+        gae_lambda: float = 0.95,
+        gae_gamma: float = 0.99,
+        policy_lr: float = 3e-4,
+        critic_lr: float = 3e-4,
+        log_to_wandb: bool = False,
+        load_wandb: bool = True,
+        wandb_run: Union[Run, None] = None,
+        wandb_project_name: Union[str, None] = None,
+        wandb_group_name: Union[str, None] = None,
+        wandb_run_name: Union[str, None] = None,
+        checkpoints_save_folder: Union[str, None] = None,
+        add_unix_timestamp: bool = True,
+        checkpoint_load_folder: Union[str, None] = None,
+        save_every_ts: int = 1_000_000,
+        instance_launch_delay: Union[float, None] = None,
+        random_seed: int = 123,
+        n_checkpoints_to_keep: int = 5,
+        shm_buffer_size: int = 8192,
+        device: str = "auto",
+        use_mixed_precision: bool = False,
     ):
-
         assert (
             env_create_function is not None
         ), "MUST PROVIDE A FUNCTION TO CREATE RLGYM FUNCTIONS TO INITIALIZE RLGYM-PPO"
@@ -104,6 +96,7 @@ class Learner(object):
         self.standardize_returns = standardize_returns
         self.save_every_ts = save_every_ts
         self.ts_since_last_save = 0
+        self.use_mixed_precision = use_mixed_precision
 
         if device in {"auto", "gpu"} and torch.cuda.is_available():
             self.device = "cuda:0"
@@ -166,6 +159,7 @@ class Learner(object):
             critic_lr=critic_lr,
             clip_range=ppo_clip_range,
             ent_coef=ppo_ent_coef,
+            use_mixed_precision=self.use_mixed_precision,
         )
 
         self.agent.policy = self.ppo_learner.policy
@@ -212,7 +206,9 @@ class Learner(object):
             print("Created new wandb run!", self.wandb_run.id)
         print("Learner successfully initialized!")
 
-    def update_learning_rate(self, new_policy_lr=None, new_critic_lr=None):
+    def update_learning_rate(
+        self, new_policy_lr: float = None, new_critic_lr: float = None
+    ) -> None:
         if new_policy_lr is not None:
             self.policy_lr = new_policy_lr
             for param_group in self.ppo_learner.policy_optimizer.param_groups:
@@ -223,13 +219,12 @@ class Learner(object):
             self.critic_lr = new_critic_lr
             for param_group in self.ppo_learner.value_optimizer.param_groups:
                 param_group["lr"] = new_critic_lr
-            print(f"New policy learning rate: {new_policy_lr}")
+            print(f"New policy learning rate: {new_critic_lr}")
 
-    def learn(self):
+    def learn(self) -> None:
         """
         Function to wrap the _learn function in a try/catch/finally
         block to ensure safe execution and error handling.
-        :return: None
         """
         try:
             self._learn()
@@ -247,11 +242,25 @@ class Learner(object):
         finally:
             self.cleanup()
 
-    def _learn(self):
+    def _learn(self) -> None:
         """
         Learning function. This is where the magic happens.
-        :return: None
         """
+
+        def handle_keyboard_input() -> None:
+            if kb.kbhit():
+                c = kb.getch()
+                if c == "p":  # pause
+                    print("Paused, press any key to resume")
+                    while True:
+                        if kb.kbhit():
+                            break
+                if c in ("c", "q"):
+                    self.save(self.agent.cumulative_timesteps)
+                if c == "q":
+                    return
+                if c in ("c", "p"):
+                    print("Resuming...\n")
 
         # Class to watch for keyboard hits
         kb = KBHit()
@@ -315,24 +324,8 @@ class Learner(object):
             if "cuda" in self.device:
                 torch.cuda.empty_cache()
 
-            # Check if keyboard press
-            # p: pause, any key to resume
-            # c: checkpoint
-            # q: checkpoint and quit
-
-            if kb.kbhit():
-                c = kb.getch()
-                if c == "p":  # pause
-                    print("Paused, press any key to resume")
-                    while True:
-                        if kb.kbhit():
-                            break
-                if c in ("c", "q"):
-                    self.save(self.agent.cumulative_timesteps)
-                if c == "q":
-                    return
-                if c in ("c", "p"):
-                    print("Resuming...\n")
+            # Check for keyboard input
+            handle_keyboard_input()
 
             # Save if we've reached the next checkpoint timestep.
             if self.ts_since_last_save >= self.save_every_ts:
@@ -342,29 +335,28 @@ class Learner(object):
             self.epoch += 1
 
     @torch.no_grad()
-    def add_new_experience(self, experience):
+    def add_new_experience(self, experience: tuple) -> None:
         """
         Function to add timesteps to our experience buffer and compute the advantage
         function estimates, value function
         estimates, and returns.
         :param experience: tuple containing
         (experience, steps_collected, collection_time) from an agent.
-        :return: None
         """
 
         # Unpack timestep data.
         states, actions, log_probs, rewards, next_states, dones, truncated = experience
         value_net = self.ppo_learner.value_net
 
-        # Construct input to the value function estimator that includes the final state
-        # (which an action was not taken in)
-        val_inp = np.zeros(shape=(states.shape[0] + 1, states.shape[1]))
-        val_inp[:-1] = states
-        val_inp[-1] = next_states[-1]
+        # Convert NumPy arrays to PyTorch tensors
+        states = torch.as_tensor(states, dtype=torch.float32, device=self.device)
+        next_states = torch.as_tensor(
+            next_states, dtype=torch.float32, device=self.device
+        )
 
-        # Predict the expected returns at each state.
+        # Compute the value predictions directly on the GPU
+        val_inp = torch.cat([states, next_states[-1:]], dim=0).to(self.device)
         val_preds = value_net(val_inp).cpu().flatten().tolist()
-        torch.cuda.empty_cache()
 
         # Compute the desired reinforcement learning quantities.
         ret_std = self.return_stats.std[0] if self.standardize_returns else None
@@ -398,12 +390,11 @@ class Learner(object):
             advantages,
         )
 
-    def save(self, cumulative_timesteps):
+    def save(self, cumulative_timesteps: int) -> None:
         """
         Function to save a checkpoint.
         :param cumulative_timesteps: Number of timesteps that have passed so far in the
         learning algorithm.
-        :return: None
         """
 
         # Make the file path to which the checkpoint will be saved
@@ -456,14 +447,20 @@ class Learner(object):
 
         print(f"Checkpoint {cumulative_timesteps} saved!\n")
 
-    def load(self, folder_path, load_wandb, new_policy_lr=None, new_critic_lr=None):
+    def load(
+        self,
+        folder_path: str,
+        load_wandb: bool,
+        new_policy_lr: float = None,
+        new_critic_lr: float = None,
+    ) -> bool:
         """
         Function to load the learning algorithm from a checkpoint.
 
         :param folder_path: Path to the checkpoint folder that will be loaded.
         :param load_wandb: Whether to resume an existing weights and biases run that
         was saved with the checkpoint being loaded.
-        :return: None
+        :return: bool indicating whether a wandb run was loaded successfully.
         """
 
         # Make sure the folder exists.
@@ -501,8 +498,6 @@ class Learner(object):
             if new_policy_lr is not None or new_critic_lr is not None:
                 self.update_learning_rate(new_policy_lr, new_critic_lr)
 
-            # check here for backwards compatibility
-
             if "wandb_run_id" in book_keeping_vars and load_wandb:
                 self.wandb_run = wandb.init(
                     settings=wandb.Settings(start_method="spawn"),
@@ -519,14 +514,13 @@ class Learner(object):
         print("Checkpoint loaded!")
         return wandb_loaded
 
-    def cleanup(self):
+    def cleanup(self) -> None:
         """
         Function to clean everything up before shutting down.
-        :return: None.
         """
 
         if self.wandb_run is not None:
             self.wandb_run.finish()
-        if type(self.agent) == BatchedAgentManager:
+        if isinstance(self.agent, BatchedAgentManager):
             self.agent.cleanup()
         self.experience_buffer.clear()

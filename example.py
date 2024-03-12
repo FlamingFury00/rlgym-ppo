@@ -120,5 +120,6 @@ if __name__ == "__main__":
         save_every_ts=100_000,
         timestep_limit=1_000_000_000,
         log_to_wandb=True,
+        use_mixed_precision=False,
     )
     learner.learn()

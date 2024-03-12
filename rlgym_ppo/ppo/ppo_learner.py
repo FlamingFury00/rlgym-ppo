@@ -1,32 +1,37 @@
 import os
 import time
+from typing import Tuple
 
 import numpy as np
 import torch
-from torch.cuda.amp import autocast, GradScaler
+from torch.cuda.amp import GradScaler, autocast
 
 from rlgym_ppo.ppo import ContinuousPolicy, DiscreteFF, MultiDiscreteFF, ValueEstimator
+from rlgym_ppo.ppo.experience_buffer import ExperienceBuffer
 
 
 class PPOLearner(object):
     def __init__(
         self,
-        obs_space_size,
-        act_space_size,
-        policy_type,
-        policy_layer_sizes,
-        critic_layer_sizes,
-        continuous_var_range,
-        batch_size,
-        n_epochs,
-        policy_lr,
-        critic_lr,
-        clip_range,
-        ent_coef,
-        mini_batch_size,
-        device,
+        obs_space_size: int,
+        act_space_size: int,
+        policy_type: int,
+        policy_layer_sizes: Tuple[int, ...],
+        critic_layer_sizes: Tuple[int, ...],
+        continuous_var_range: Tuple[float, ...],
+        batch_size: int,
+        n_epochs: int,
+        policy_lr: float,
+        critic_lr: float,
+        clip_range: float,
+        ent_coef: float,
+        mini_batch_size: int,
+        device: str,
+        use_mixed_precision: bool = False,
     ):
         self.device = device
+        self.use_mixed_precision = use_mixed_precision
+        self.scaler = GradScaler() if use_mixed_precision else None
 
         assert (
             batch_size % mini_batch_size == 0
@@ -54,14 +59,11 @@ class PPOLearner(object):
         )
         self.mini_batch_size = mini_batch_size
 
-        self.policy_optimizer = torch.optim.AdamW(
-            self.policy.parameters(), lr=policy_lr
-        )  # Changed optimizer to AdamW
-        self.value_optimizer = torch.optim.AdamW(
+        self.policy_optimizer = torch.optim.Adam(self.policy.parameters(), lr=policy_lr)
+        self.value_optimizer = torch.optim.Adam(
             self.value_net.parameters(), lr=critic_lr
         )
         self.value_loss_fn = torch.nn.MSELoss()
-        self.scaler = GradScaler()  # Scaler for mixed-precision training
 
         # Calculate parameter counts
         policy_params = self.policy.parameters()
@@ -86,6 +88,7 @@ class PPOLearner(object):
 
         print(f"Current Policy Learning Rate: {policy_lr}")
         print(f"Current Critic Learning Rate: {critic_lr}")
+        print(f"Using Mixed Precision Training: {use_mixed_precision}")
 
         self.n_epochs = n_epochs
         self.batch_size = batch_size
@@ -93,7 +96,7 @@ class PPOLearner(object):
         self.ent_coef = ent_coef
         self.cumulative_model_updates = 0
 
-    def learn(self, exp):
+    def learn(self, exp: ExperienceBuffer) -> dict:
         """
         Compute PPO updates with an experience buffer.
 
@@ -132,9 +135,7 @@ class PPOLearner(object):
                     batch_advantages,
                 ) = batch
                 batch_acts = batch_acts.view(self.batch_size, -1)
-                self.policy_optimizer.zero_grad(
-                    set_to_none=True
-                )  # Set gradients to None to save memory
+                self.policy_optimizer.zero_grad(set_to_none=True)
                 self.value_optimizer.zero_grad(set_to_none=True)
 
                 for minibatch_slice in range(0, self.batch_size, self.mini_batch_size):
@@ -149,7 +150,9 @@ class PPOLearner(object):
                     target_values = batch_target_values[start:stop].to(self.device)
 
                     # Compute value estimates.
-                    with autocast(dtype=torch.float32):  # Mixed-precision training
+                    with autocast(
+                        enabled=self.use_mixed_precision, dtype=torch.float32
+                    ):
                         vals = self.value_net(obs).view_as(target_values)
 
                         # Get policy log probs & entropy.
@@ -176,39 +179,48 @@ class PPOLearner(object):
                                 .cpu()
                                 .item()
                             )
-                        clip_fractions.append(clip_fraction)
+                            clip_fractions.append(clip_fraction)
 
-                    policy_loss = -torch.min(
-                        ratio * advantages, clipped * advantages
-                    ).mean()
-                    value_loss = self.value_loss_fn(vals, target_values)
-                    ppo_loss = (
-                        (policy_loss - entropy * self.ent_coef)
-                        * self.mini_batch_size
-                        / self.batch_size
-                    )
+                        policy_loss = -torch.min(
+                            ratio * advantages, clipped * advantages
+                        ).mean()
+                        value_loss = self.value_loss_fn(vals, target_values)
+                        ppo_loss = (
+                            (policy_loss - entropy * self.ent_coef)
+                            * self.mini_batch_size
+                            / self.batch_size
+                        )
 
-                    # Mixed-precision training
-                    self.scaler.scale(ppo_loss).backward(retain_graph=True)
-                    self.scaler.scale(value_loss).backward()
+                    if self.use_mixed_precision:
+                        self.scaler.scale(ppo_loss).backward()
+                        self.scaler.scale(value_loss).backward()
+                        self.scaler.unscale_(self.policy_optimizer)
+                        self.scaler.unscale_(self.value_optimizer)
+                        torch.nn.utils.clip_grad_norm_(
+                            self.value_net.parameters(), max_norm=0.5
+                        )
+                        torch.nn.utils.clip_grad_norm_(
+                            self.policy.parameters(), max_norm=0.5
+                        )
+                        self.scaler.step(self.policy_optimizer)
+                        self.scaler.step(self.value_optimizer)
+                        self.scaler.update()
+                    else:
+                        ppo_loss.backward()
+                        value_loss.backward()
+                        torch.nn.utils.clip_grad_norm_(
+                            self.value_net.parameters(), max_norm=0.5
+                        )
+                        torch.nn.utils.clip_grad_norm_(
+                            self.policy.parameters(), max_norm=0.5
+                        )
+                        self.policy_optimizer.step()
+                        self.value_optimizer.step()
 
                     mean_val_loss += value_loss.cpu().detach().item()
                     mean_divergence += kl
                     mean_entropy += entropy.cpu().detach().item()
                     n_minibatch_iterations += 1
-
-                # Gradient clipping
-                self.scaler.unscale_(self.policy_optimizer)
-                torch.nn.utils.clip_grad_norm_(self.policy.parameters(), max_norm=0.5)
-                self.scaler.unscale_(self.value_optimizer)
-                torch.nn.utils.clip_grad_norm_(
-                    self.value_net.parameters(), max_norm=0.5
-                )
-
-                # Optimizer step
-                self.scaler.step(self.policy_optimizer)
-                self.scaler.step(self.value_optimizer)
-                self.scaler.update()
 
                 n_iterations += 1
 
@@ -255,7 +267,7 @@ class PPOLearner(object):
 
         return report
 
-    def save_to(self, folder_path):
+    def save_to(self, folder_path: str) -> None:
         os.makedirs(folder_path, exist_ok=True)
         torch.save(self.policy.state_dict(), os.path.join(folder_path, "PPO_POLICY.pt"))
         torch.save(
@@ -270,7 +282,7 @@ class PPOLearner(object):
             os.path.join(folder_path, "PPO_VALUE_NET_OPTIMIZER.pt"),
         )
 
-    def load_from(self, folder_path):
+    def load_from(self, folder_path: str) -> None:
         assert os.path.exists(folder_path), "PPO LEARNER CANNOT FIND FOLDER {}".format(
             folder_path
         )
