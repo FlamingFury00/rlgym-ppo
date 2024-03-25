@@ -5,6 +5,7 @@ from typing import Tuple
 import numpy as np
 import torch
 from torch.cuda.amp import GradScaler, autocast
+from torch.utils.data import ConcatDataset, DataLoader, TensorDataset
 
 from rlgym_ppo.ppo import ContinuousPolicy, DiscreteFF, MultiDiscreteFF, ValueEstimator
 from rlgym_ppo.ppo.experience_buffer import ExperienceBuffer
@@ -126,103 +127,96 @@ class PPOLearner(object):
         for epoch in range(self.n_epochs):
             # Get all shuffled batches from the experience buffer.
             batches = exp.get_all_batches_shuffled(self.batch_size)
-            for batch in batches:
-                (
-                    batch_acts,
-                    batch_old_probs,
-                    batch_obs,
-                    batch_target_values,
-                    batch_advantages,
-                ) = batch
-                batch_acts = batch_acts.view(self.batch_size, -1)
+            batches = [
+                TensorDataset(
+                    batch_obs.to(self.device),
+                    batch_acts.view(self.batch_size, -1).to(self.device),
+                    batch_old_probs.to(self.device),
+                    batch_target_values.to(self.device),
+                    batch_advantages.to(self.device),
+                )
+                for batch_acts, batch_old_probs, batch_obs, batch_target_values, batch_advantages in batches
+            ]
+            dataloader = DataLoader(
+                ConcatDataset(batches),
+                batch_size=self.mini_batch_size,
+                shuffle=True,
+                pin_memory=self.device == "cpu",
+            )
+
+            for batch_obs, acts, old_probs, target_values, advantages in dataloader:
                 self.policy_optimizer.zero_grad(set_to_none=True)
                 self.value_optimizer.zero_grad(set_to_none=True)
 
-                for minibatch_slice in range(0, self.batch_size, self.mini_batch_size):
-                    # Send everything to the device and enforce correct shapes.
-                    start = minibatch_slice
-                    stop = start + self.mini_batch_size
+                with autocast(enabled=self.use_mixed_precision, dtype=torch.float32):
+                    vals = self.value_net(batch_obs).view_as(target_values)
 
-                    acts = batch_acts[start:stop].to(self.device)
-                    obs = batch_obs[start:stop].to(self.device)
-                    advantages = batch_advantages[start:stop].to(self.device)
-                    old_probs = batch_old_probs[start:stop].to(self.device)
-                    target_values = batch_target_values[start:stop].to(self.device)
+                    # Get policy log probs & entropy.
+                    log_probs, entropy = self.policy.get_backprop_data(batch_obs, acts)
+                    log_probs = log_probs.view_as(old_probs)
 
-                    # Compute value estimates.
-                    with autocast(
-                        enabled=self.use_mixed_precision, dtype=torch.float32
-                    ):
-                        vals = self.value_net(obs).view_as(target_values)
+                    # Compute PPO loss.
+                    ratio = torch.exp(log_probs - old_probs)
+                    clipped = torch.clamp(
+                        ratio, 1.0 - self.clip_range, 1.0 + self.clip_range
+                    )
 
-                        # Get policy log probs & entropy.
-                        log_probs, entropy = self.policy.get_backprop_data(obs, acts)
-                        log_probs = log_probs.view_as(old_probs)
+                    # Compute KL divergence & clip fraction using SB3 method for reporting.
+                    with torch.no_grad():
+                        log_ratio = log_probs - old_probs
+                        kl = (torch.exp(log_ratio) - 1) - log_ratio
+                        kl = kl.mean().detach().cpu().item()
 
-                        # Compute PPO loss.
-                        ratio = torch.exp(log_probs - old_probs)
-                        clipped = torch.clamp(
-                            ratio, 1.0 - self.clip_range, 1.0 + self.clip_range
+                        # From the stable-baselines3 implementation of PPO.
+                        clip_fraction = (
+                            torch.mean((torch.abs(ratio - 1) > self.clip_range).float())
+                            .cpu()
+                            .item()
                         )
+                        clip_fractions.append(clip_fraction)
 
-                        # Compute KL divergence & clip fraction using SB3 method for reporting.
-                        with torch.no_grad():
-                            log_ratio = log_probs - old_probs
-                            kl = (torch.exp(log_ratio) - 1) - log_ratio
-                            kl = kl.mean().detach().cpu().item()
+                    policy_loss = -torch.min(
+                        ratio * advantages, clipped * advantages
+                    ).mean()
+                    value_loss = self.value_loss_fn(vals, target_values)
+                    ppo_loss = (
+                        (policy_loss - entropy * self.ent_coef)
+                        * self.mini_batch_size
+                        / self.batch_size
+                    )
 
-                            # From the stable-baselines3 implementation of PPO.
-                            clip_fraction = (
-                                torch.mean(
-                                    (torch.abs(ratio - 1) > self.clip_range).float()
-                                )
-                                .cpu()
-                                .item()
-                            )
-                            clip_fractions.append(clip_fraction)
+                if self.use_mixed_precision:
+                    self.scaler.scale(ppo_loss).backward()
+                    self.scaler.scale(value_loss).backward()
+                    self.scaler.unscale_(self.policy_optimizer)
+                    self.scaler.unscale_(self.value_optimizer)
+                    torch.nn.utils.clip_grad_norm_(
+                        self.value_net.parameters(), max_norm=0.5
+                    )
+                    torch.nn.utils.clip_grad_norm_(
+                        self.policy.parameters(), max_norm=0.5
+                    )
+                    self.scaler.step(self.policy_optimizer)
+                    self.scaler.step(self.value_optimizer)
+                    self.scaler.update()
+                else:
+                    ppo_loss.backward()
+                    value_loss.backward()
+                    torch.nn.utils.clip_grad_norm_(
+                        self.value_net.parameters(), max_norm=0.5
+                    )
+                    torch.nn.utils.clip_grad_norm_(
+                        self.policy.parameters(), max_norm=0.5
+                    )
+                    self.policy_optimizer.step()
+                    self.value_optimizer.step()
 
-                        policy_loss = -torch.min(
-                            ratio * advantages, clipped * advantages
-                        ).mean()
-                        value_loss = self.value_loss_fn(vals, target_values)
-                        ppo_loss = (
-                            (policy_loss - entropy * self.ent_coef)
-                            * self.mini_batch_size
-                            / self.batch_size
-                        )
+                mean_val_loss += value_loss.cpu().detach().item()
+                mean_divergence += kl
+                mean_entropy += entropy.cpu().detach().item()
+                n_minibatch_iterations += 1
 
-                    if self.use_mixed_precision:
-                        self.scaler.scale(ppo_loss).backward()
-                        self.scaler.scale(value_loss).backward()
-                        self.scaler.unscale_(self.policy_optimizer)
-                        self.scaler.unscale_(self.value_optimizer)
-                        torch.nn.utils.clip_grad_norm_(
-                            self.value_net.parameters(), max_norm=0.5
-                        )
-                        torch.nn.utils.clip_grad_norm_(
-                            self.policy.parameters(), max_norm=0.5
-                        )
-                        self.scaler.step(self.policy_optimizer)
-                        self.scaler.step(self.value_optimizer)
-                        self.scaler.update()
-                    else:
-                        ppo_loss.backward()
-                        value_loss.backward()
-                        torch.nn.utils.clip_grad_norm_(
-                            self.value_net.parameters(), max_norm=0.5
-                        )
-                        torch.nn.utils.clip_grad_norm_(
-                            self.policy.parameters(), max_norm=0.5
-                        )
-                        self.policy_optimizer.step()
-                        self.value_optimizer.step()
-
-                    mean_val_loss += value_loss.cpu().detach().item()
-                    mean_divergence += kl
-                    mean_entropy += entropy.cpu().detach().item()
-                    n_minibatch_iterations += 1
-
-                n_iterations += 1
+            n_iterations += 1
 
         if n_iterations == 0:
             n_iterations = 1
