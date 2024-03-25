@@ -7,7 +7,7 @@ import torch
 from torch.cuda.amp import GradScaler, autocast
 from torch.utils.data import ConcatDataset, DataLoader, TensorDataset
 
-from rlgym_ppo.ppo import ContinuousPolicy, DiscreteFF, MultiDiscreteFF, ValueEstimator
+from moe_policy_value import MoEPolicyValue
 from rlgym_ppo.ppo.experience_buffer import ExperienceBuffer
 
 
@@ -33,42 +33,27 @@ class PPOLearner(object):
         self.device = device
         self.use_mixed_precision = use_mixed_precision
         self.scaler = GradScaler() if use_mixed_precision else None
+        self.model = MoEPolicyValue(
+            obs_space_size=obs_space_size,
+            act_space_size=act_space_size,
+            hidden_size=policy_layer_sizes[0],
+            num_experts=10,
+            k=4,
+        ).to(device)
 
         assert (
             batch_size % mini_batch_size == 0
         ), "MINIBATCH SIZE MUST BE AN INTEGER MULTIPLE OF BATCH SIZE"
 
-        if policy_type == 2:
-            self.policy = ContinuousPolicy(
-                obs_space_size,
-                act_space_size * 2,
-                policy_layer_sizes,
-                device,
-                var_min=continuous_var_range[0],
-                var_max=continuous_var_range[1],
-            ).to(device)
-        elif policy_type == 1:
-            self.policy = MultiDiscreteFF(
-                obs_space_size, policy_layer_sizes, device
-            ).to(device)
-        else:
-            self.policy = DiscreteFF(
-                obs_space_size, act_space_size, policy_layer_sizes, device
-            ).to(device)
-        self.value_net = ValueEstimator(obs_space_size, critic_layer_sizes, device).to(
-            device
-        )
         self.mini_batch_size = mini_batch_size
 
-        self.policy_optimizer = torch.optim.Adam(self.policy.parameters(), lr=policy_lr)
-        self.value_optimizer = torch.optim.Adam(
-            self.value_net.parameters(), lr=critic_lr
-        )
+        self.policy_optimizer = torch.optim.Adam(self.model.parameters(), lr=policy_lr)
+        self.value_optimizer = torch.optim.Adam(self.model.parameters(), lr=critic_lr)
         self.value_loss_fn = torch.nn.MSELoss()
 
         # Calculate parameter counts
-        policy_params = self.policy.parameters()
-        critic_params = self.value_net.parameters()
+        policy_params = self.model.policy_moe.parameters()
+        critic_params = self.model.value_moe.parameters()
 
         trainable_policy_parameters = filter(lambda p: p.requires_grad, policy_params)
         policy_params_count = sum(p.numel() for p in trainable_policy_parameters)
@@ -117,10 +102,10 @@ class PPOLearner(object):
 
         # Save parameters before computing any updates.
         policy_before = torch.nn.utils.parameters_to_vector(
-            self.policy.parameters()
+            self.model.policy_moe.parameters()
         ).cpu()
         critic_before = torch.nn.utils.parameters_to_vector(
-            self.value_net.parameters()
+            self.model.value_moe.parameters()
         ).cpu()
 
         t1 = time.time()
@@ -149,11 +134,11 @@ class PPOLearner(object):
                 self.value_optimizer.zero_grad(set_to_none=True)
 
                 with autocast(enabled=self.use_mixed_precision, dtype=torch.float32):
-                    vals = self.value_net(batch_obs).view_as(target_values)
+                    policy_output, vals = self.model(batch_obs)
 
                     # Get policy log probs & entropy.
-                    log_probs, entropy = self.policy.get_backprop_data(batch_obs, acts)
-                    log_probs = log_probs.view_as(old_probs)
+                    log_probs = policy_output.log_prob(acts)
+                    entropy = policy_output.entropy().mean()
 
                     # Compute PPO loss.
                     ratio = torch.exp(log_probs - old_probs)
@@ -191,10 +176,10 @@ class PPOLearner(object):
                     self.scaler.unscale_(self.policy_optimizer)
                     self.scaler.unscale_(self.value_optimizer)
                     torch.nn.utils.clip_grad_norm_(
-                        self.value_net.parameters(), max_norm=0.5
+                        self.model.value_moe.parameters(), max_norm=0.5
                     )
                     torch.nn.utils.clip_grad_norm_(
-                        self.policy.parameters(), max_norm=0.5
+                        self.model.policy_moe.parameters(), max_norm=0.5
                     )
                     self.scaler.step(self.policy_optimizer)
                     self.scaler.step(self.value_optimizer)
@@ -203,10 +188,10 @@ class PPOLearner(object):
                     ppo_loss.backward()
                     value_loss.backward()
                     torch.nn.utils.clip_grad_norm_(
-                        self.value_net.parameters(), max_norm=0.5
+                        self.model.value_moe.parameters(), max_norm=0.5
                     )
                     torch.nn.utils.clip_grad_norm_(
-                        self.policy.parameters(), max_norm=0.5
+                        self.model.policy_moe.parameters(), max_norm=0.5
                     )
                     self.policy_optimizer.step()
                     self.value_optimizer.step()
@@ -235,10 +220,10 @@ class PPOLearner(object):
 
         # Compute magnitude of updates made to the policy and value estimator.
         policy_after = torch.nn.utils.parameters_to_vector(
-            self.policy.parameters()
+            self.model.policy_moe.parameters()
         ).cpu()
         critic_after = torch.nn.utils.parameters_to_vector(
-            self.value_net.parameters()
+            self.model.value_moe.parameters()
         ).cpu()
         policy_update_magnitude = (policy_before - policy_after).norm().item()
         critic_update_magnitude = (critic_before - critic_after).norm().item()
@@ -263,9 +248,13 @@ class PPOLearner(object):
 
     def save_to(self, folder_path: str) -> None:
         os.makedirs(folder_path, exist_ok=True)
-        torch.save(self.policy.state_dict(), os.path.join(folder_path, "PPO_POLICY.pt"))
         torch.save(
-            self.value_net.state_dict(), os.path.join(folder_path, "PPO_VALUE_NET.pt")
+            self.model.policy_moe.state_dict(),
+            os.path.join(folder_path, "PPO_POLICY.pt"),
+        )
+        torch.save(
+            self.model.value_moe.state_dict(),
+            os.path.join(folder_path, "PPO_VALUE_NET.pt"),
         )
         torch.save(
             self.policy_optimizer.state_dict(),
@@ -281,10 +270,10 @@ class PPOLearner(object):
             folder_path
         )
 
-        self.policy.load_state_dict(
+        self.model.policy_moe.load_state_dict(
             torch.load(os.path.join(folder_path, "PPO_POLICY.pt"))
         )
-        self.value_net.load_state_dict(
+        self.model.value_moe.load_state_dict(
             torch.load(os.path.join(folder_path, "PPO_VALUE_NET.pt"))
         )
         self.policy_optimizer.load_state_dict(

@@ -162,7 +162,7 @@ class Learner(object):
             use_mixed_precision=self.use_mixed_precision,
         )
 
-        self.agent.policy = self.ppo_learner.policy
+        self.agent.policy = self.ppo_learner.model
 
         self.config = {
             "n_proc": n_proc,
@@ -346,7 +346,6 @@ class Learner(object):
 
         # Unpack timestep data.
         states, actions, log_probs, rewards, next_states, dones, truncated = experience
-        value_net = self.ppo_learner.value_net
 
         # Convert NumPy arrays to PyTorch tensors
         states = torch.as_tensor(states, dtype=torch.float32, device=self.device)
@@ -356,7 +355,8 @@ class Learner(object):
 
         # Compute the value predictions directly on the GPU
         val_inp = torch.cat([states, next_states[-1:]], dim=0).to(self.device)
-        val_preds = value_net(val_inp).cpu().flatten().tolist()
+        _, val_preds = self.ppo_learner.model(val_inp)
+        val_preds = val_preds.cpu().flatten().tolist()
 
         # Compute the desired reinforcement learning quantities.
         ret_std = self.return_stats.std[0] if self.standardize_returns else None
