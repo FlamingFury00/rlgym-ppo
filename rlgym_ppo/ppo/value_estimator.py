@@ -5,27 +5,26 @@ Author: Matthew Allen
 Description:
     An implementation of a feed-forward neural network which models the value function of a policy.
 """
-import torch.nn as nn
-import torch
+
 import numpy as np
+import torch
+import torch.nn as nn
+
+from moe import MoE
 
 
 class ValueEstimator(nn.Module):
     def __init__(self, input_shape, layer_sizes, device):
         super().__init__()
         self.device = device
-
-        assert len(layer_sizes) != 0, "AT LEAST ONE LAYER MUST BE SPECIFIED TO BUILD THE NEURAL NETWORK!"
-        layers = [nn.Linear(input_shape, layer_sizes[0]), nn.ReLU()]
-
-        prev_size = layer_sizes[0]
-        for size in layer_sizes[1:]:
-            layers.append(nn.Linear(prev_size, size))
-            layers.append(nn.ReLU())
-            prev_size = size
-
-        layers.append(nn.Linear(layer_sizes[-1], 1))
-        self.model = nn.Sequential(*layers).to(self.device)
+        self.value_net = MoE(
+            input_shape,
+            1,
+            num_experts=8,
+            hidden_size=layer_sizes[0],
+            noisy_gating=True,
+            k=4,
+        ).to(device)
 
     def forward(self, x):
         t = type(x)
@@ -33,4 +32,6 @@ class ValueEstimator(nn.Module):
             if t != np.array:
                 x = np.asarray(x)
             x = torch.as_tensor(x, dtype=torch.float32, device=self.device)
-        return self.model(x)
+
+        output, _ = self.value_net(x)
+        return output

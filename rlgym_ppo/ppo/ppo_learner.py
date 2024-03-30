@@ -4,7 +4,9 @@ import time
 import numpy as np
 import torch
 
-from rlgym_ppo.ppo import ContinuousPolicy, DiscreteFF, MultiDiscreteFF, ValueEstimator
+from rlgym_ppo.ppo import ValueEstimator
+from rlgym_ppo.ppo.discrete_policy import DiscretePolicy
+from rlgym_ppo.ppo.experience_buffer import ExperienceBuffer
 
 
 class PPOLearner(object):
@@ -12,10 +14,8 @@ class PPOLearner(object):
         self,
         obs_space_size,
         act_space_size,
-        policy_type,
         policy_layer_sizes,
         critic_layer_sizes,
-        continuous_var_range,
         batch_size,
         n_epochs,
         policy_lr,
@@ -31,23 +31,9 @@ class PPOLearner(object):
             batch_size % mini_batch_size == 0
         ), "MINIBATCH SIZE MUST BE AN INTEGER MULTIPLE OF BATCH SIZE"
 
-        if policy_type == 2:
-            self.policy = ContinuousPolicy(
-                obs_space_size,
-                act_space_size * 2,
-                policy_layer_sizes,
-                device,
-                var_min=continuous_var_range[0],
-                var_max=continuous_var_range[1],
-            ).to(device)
-        elif policy_type == 1:
-            self.policy = MultiDiscreteFF(
-                obs_space_size, policy_layer_sizes, device
-            ).to(device)
-        else:
-            self.policy = DiscreteFF(
-                obs_space_size, act_space_size, policy_layer_sizes, device
-            ).to(device)
+        self.policy = DiscretePolicy(
+            obs_space_size, act_space_size, policy_layer_sizes, device
+        ).to(device)
         self.value_net = ValueEstimator(obs_space_size, critic_layer_sizes, device).to(
             device
         )
@@ -79,7 +65,7 @@ class PPOLearner(object):
         print(f"{'Critic':<10} {critic_params_count:<10}")
         print("-" * 20)
         print(f"{'Total':<10} {total_parameters:<10}")
-        
+
         print(f"Current Policy Learning Rate: {policy_lr}")
         print(f"Current Critic Learning Rate: {critic_lr}")
 
@@ -89,7 +75,7 @@ class PPOLearner(object):
         self.ent_coef = ent_coef
         self.cumulative_model_updates = 0
 
-    def learn(self, exp):
+    def learn(self, exp: ExperienceBuffer):
         """
         Compute PPO updates with an experience buffer.
 
@@ -242,9 +228,12 @@ class PPOLearner(object):
 
     def save_to(self, folder_path):
         os.makedirs(folder_path, exist_ok=True)
-        torch.save(self.policy.state_dict(), os.path.join(folder_path, "PPO_POLICY.pt"))
         torch.save(
-            self.value_net.state_dict(), os.path.join(folder_path, "PPO_VALUE_NET.pt")
+            self.policy.policy.state_dict(), os.path.join(folder_path, "PPO_POLICY.pt")
+        )
+        torch.save(
+            self.value_net.value_net.state_dict(),
+            os.path.join(folder_path, "PPO_VALUE_NET.pt"),
         )
         torch.save(
             self.policy_optimizer.state_dict(),
@@ -260,10 +249,10 @@ class PPOLearner(object):
             folder_path
         )
 
-        self.policy.load_state_dict(
+        self.policy.policy.load_state_dict(
             torch.load(os.path.join(folder_path, "PPO_POLICY.pt"))
         )
-        self.value_net.load_state_dict(
+        self.value_net.value_net.load_state_dict(
             torch.load(os.path.join(folder_path, "PPO_VALUE_NET.pt"))
         )
         self.policy_optimizer.load_state_dict(

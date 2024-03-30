@@ -6,31 +6,26 @@ Description:
     An implementation of a feed-forward neural network which parametrizes a discrete distribution over a space of actions.
 """
 
-
-from torch.distributions import Categorical
-import torch.nn as nn
-import torch
 import numpy as np
+import torch
+import torch.nn as nn
+
+from moe import MoE
 
 
-class DiscreteFF(nn.Module):
+class DiscretePolicy(nn.Module):
     def __init__(self, input_shape, n_actions, layer_sizes, device):
         super().__init__()
         self.device = device
-
-        assert len(layer_sizes) != 0, "AT LEAST ONE LAYER MUST BE SPECIFIED TO BUILD THE NEURAL NETWORK!"
-        layers = [nn.Linear(input_shape, layer_sizes[0]), nn.ReLU()]
-        prev_size = layer_sizes[0]
-        for size in layer_sizes[1:]:
-            layers.append(nn.Linear(prev_size, size))
-            layers.append(nn.ReLU())
-            prev_size = size
-
-        layers.append(nn.Linear(layer_sizes[-1], n_actions))
-        layers.append(nn.Softmax(dim=-1))
-        self.model = nn.Sequential(*layers).to(self.device)
-
         self.n_actions = n_actions
+        self.policy = MoE(
+            input_shape,
+            n_actions,
+            num_experts=8,
+            hidden_size=layer_sizes[0],
+            noisy_gating=True,
+            k=4,
+        ).to(device)
 
     def get_output(self, obs):
         t = type(obs)
@@ -39,7 +34,8 @@ class DiscreteFF(nn.Module):
                 obs = np.asarray(obs)
             obs = torch.as_tensor(obs, dtype=torch.float32, device=self.device)
 
-        return self.model(obs)
+        output, _ = self.policy(obs)
+        return output
 
     def get_action(self, obs, deterministic=False):
         """
@@ -69,8 +65,8 @@ class DiscreteFF(nn.Module):
         :return: Action log probs & entropy.
         """
         acts = acts.long()
-        probs = self.get_output(obs)
-        probs = probs.view(-1, self.n_actions)
+        output, _ = self.policy(obs)
+        probs = output.view(-1, self.n_actions)
         probs = torch.clamp(probs, min=1e-11, max=1)
 
         log_probs = torch.log(probs)
