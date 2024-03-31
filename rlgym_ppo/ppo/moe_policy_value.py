@@ -3,7 +3,7 @@ import torch
 import torch.distributions as dist
 import torch.nn as nn
 
-from moe import MoE
+from .moe import MoE
 
 
 class MoEPolicyValue(nn.Module):

@@ -6,7 +6,7 @@ import numpy as np
 import torch
 from torch.cuda.amp import GradScaler
 
-from moe_policy_value import MoEPolicyValue
+from .moe_policy_value import MoEPolicyValue
 from rlgym_ppo.ppo.experience_buffer import ExperienceBuffer
 
 
