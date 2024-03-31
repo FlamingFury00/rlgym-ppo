@@ -4,8 +4,7 @@ from typing import Tuple
 
 import numpy as np
 import torch
-from torch.cuda.amp import GradScaler, autocast
-from torch.utils.data import ConcatDataset, DataLoader, TensorDataset
+from torch.cuda.amp import GradScaler
 
 from moe_policy_value import MoEPolicyValue
 from rlgym_ppo.ppo.experience_buffer import ExperienceBuffer
@@ -112,33 +111,36 @@ class PPOLearner(object):
         for epoch in range(self.n_epochs):
             # Get all shuffled batches from the experience buffer.
             batches = exp.get_all_batches_shuffled(self.batch_size)
-            batches = [
-                TensorDataset(
-                    batch_obs.to(self.device),
-                    batch_acts.view(self.batch_size, -1).to(self.device),
-                    batch_old_probs.to(self.device),
-                    batch_target_values.to(self.device),
-                    batch_advantages.to(self.device),
-                )
-                for batch_acts, batch_old_probs, batch_obs, batch_target_values, batch_advantages in batches
-            ]
-            dataloader = DataLoader(
-                ConcatDataset(batches),
-                batch_size=self.mini_batch_size,
-                shuffle=True,
-                pin_memory=self.device == "cpu",
-            )
+            for batch in batches:
+                (
+                    batch_acts,
+                    batch_old_probs,
+                    batch_obs,
+                    batch_target_values,
+                    batch_advantages,
+                ) = batch
+                batch_acts = batch_acts.view(self.batch_size, -1)
+                self.policy_optimizer.zero_grad()
+                self.value_optimizer.zero_grad()
 
-            for batch_obs, acts, old_probs, target_values, advantages in dataloader:
-                self.policy_optimizer.zero_grad(set_to_none=True)
-                self.value_optimizer.zero_grad(set_to_none=True)
+                for minibatch_slice in range(0, self.batch_size, self.mini_batch_size):
+                    # Send everything to the device and enforce correct shapes.
+                    start = minibatch_slice
+                    stop = start + self.mini_batch_size
 
-                with autocast(enabled=self.use_mixed_precision, dtype=torch.float32):
-                    policy_output, vals = self.model(batch_obs)
+                    acts = batch_acts[start:stop].to(self.device)
+                    obs = batch_obs[start:stop].to(self.device)
+                    advantages = batch_advantages[start:stop].to(self.device)
+                    old_probs = batch_old_probs[start:stop].to(self.device)
+                    target_values = batch_target_values[start:stop].to(self.device)
+
+                    # Compute value estimates.
+                    output_tensor, _ = self.model.value_moe(obs)
+                    vals = output_tensor.view_as(target_values)
 
                     # Get policy log probs & entropy.
-                    log_probs = policy_output.log_prob(acts)
-                    entropy = policy_output.entropy().mean()
+                    log_probs, entropy = self.model.get_backprop_data(obs, acts)
+                    log_probs = log_probs.view_as(old_probs)
 
                     # Compute PPO loss.
                     ratio = torch.exp(log_probs - old_probs)
@@ -170,38 +172,25 @@ class PPOLearner(object):
                         / self.batch_size
                     )
 
-                if self.use_mixed_precision:
-                    self.scaler.scale(ppo_loss).backward()
-                    self.scaler.scale(value_loss).backward()
-                    self.scaler.unscale_(self.policy_optimizer)
-                    self.scaler.unscale_(self.value_optimizer)
-                    torch.nn.utils.clip_grad_norm_(
-                        self.model.value_moe.parameters(), max_norm=0.5
-                    )
-                    torch.nn.utils.clip_grad_norm_(
-                        self.model.policy_moe.parameters(), max_norm=0.5
-                    )
-                    self.scaler.step(self.policy_optimizer)
-                    self.scaler.step(self.value_optimizer)
-                    self.scaler.update()
-                else:
                     ppo_loss.backward()
                     value_loss.backward()
-                    torch.nn.utils.clip_grad_norm_(
-                        self.model.value_moe.parameters(), max_norm=0.5
-                    )
-                    torch.nn.utils.clip_grad_norm_(
-                        self.model.policy_moe.parameters(), max_norm=0.5
-                    )
-                    self.policy_optimizer.step()
-                    self.value_optimizer.step()
 
-                mean_val_loss += value_loss.cpu().detach().item()
-                mean_divergence += kl
-                mean_entropy += entropy.cpu().detach().item()
-                n_minibatch_iterations += 1
+                    mean_val_loss += value_loss.cpu().detach().item()
+                    mean_divergence += kl
+                    mean_entropy += entropy.cpu().detach().item()
+                    n_minibatch_iterations += 1
 
-            n_iterations += 1
+                torch.nn.utils.clip_grad_norm_(
+                    self.model.value_moe.parameters(), max_norm=0.5
+                )
+                torch.nn.utils.clip_grad_norm_(
+                    self.model.policy_moe.parameters(), max_norm=0.5
+                )
+
+                self.policy_optimizer.step()
+                self.value_optimizer.step()
+
+                n_iterations += 1
 
         if n_iterations == 0:
             n_iterations = 1
