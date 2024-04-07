@@ -7,9 +7,8 @@ Description:
 
 """
 
-
-import torch.nn as nn
 import torch
+import torch.nn as nn
 
 
 class MapContinuousToAction(nn.Module):
@@ -20,6 +19,7 @@ class MapContinuousToAction(nn.Module):
     be positive, this class will map the range [-1, 1] for those values to the desired range (defaults to [0.1, 1]) using
     a simple linear transform.
     """
+
     def __init__(self, range_min=0.1, range_max=1):
         super().__init__()
 
@@ -48,7 +48,6 @@ def compute_gae(rews, dones, truncated, values, gamma=0.99, lmbda=0.95, return_s
     :return: Bootstrapped value function estimates, GAE results, returns.
     """
     next_values = values[1:]
-    terminal = dones
 
     last_gae_lam = 0
     n_returns = len(rews)
@@ -57,29 +56,26 @@ def compute_gae(rews, dones, truncated, values, gamma=0.99, lmbda=0.95, return_s
     last_return = 0
 
     for step in reversed(range(n_returns)):
-        if step == n_returns - 1:
-            done = 1 - terminal[-1]
-            trunc = 1 - truncated[-1]
-        else:
-            done = 1 - terminal[step + 1]
-            trunc = 1 - truncated[step + 1]
+        not_done = 1 - dones[step]
+        not_trunc = 1 - truncated[step]
 
         if return_std is not None:
             norm_rew = min(max(rews[step] / return_std, -10), 10)
         else:
             norm_rew = rews[step]
 
-        pred_ret = norm_rew + gamma * next_values[step] * done
+        pred_ret = norm_rew + gamma * next_values[step] * not_done
         delta = pred_ret - values[step]
-        ret = rews[step] + last_return*gamma*done*trunc
+        ret = rews[step] + last_return * gamma * not_done * not_trunc
         returns[step] = ret
         last_return = ret
-        last_gae_lam = delta + gamma * lmbda * done * last_gae_lam
+        last_gae_lam = delta + gamma * lmbda * not_done * not_trunc * last_gae_lam
         adv[step] = last_gae_lam
 
-
     advantages = torch.as_tensor(adv, dtype=torch.float32)
-    values = torch.as_tensor([v + a for v, a in zip(values[:-1], adv)], dtype=torch.float32)
+    values = torch.as_tensor(
+        [v + a for v, a in zip(values[:-1], adv)], dtype=torch.float32
+    )
     return values, advantages, returns
 
 
@@ -90,6 +86,7 @@ class MultiDiscreteRolv(nn.Module):
     such that each of the 8 actions has 3 options (to avoid a ragged list), then builds a categorical distribution over
     each class for each action. Credit to Rolv Arild for coming up with this method.
     """
+
     def __init__(self, bins):
         super().__init__()
         self.distribution = None
@@ -109,7 +106,9 @@ class MultiDiscreteRolv(nn.Module):
         triplets = torch.stack(logits[:5], dim=-1)
 
         # Separate duets and pad the final dimension with -inf to create triplets.
-        duets = torch.nn.functional.pad(torch.stack(logits[5:], dim=-1), pad=(0,0,0,1), value=float("-inf"))
+        duets = torch.nn.functional.pad(
+            torch.stack(logits[5:], dim=-1), pad=(0, 0, 0, 1), value=float("-inf")
+        )
 
         # Un-split the logits now that the duets have been converted into triplets and reshape them into the correct shape.
         logits = torch.cat((triplets, duets), dim=-1).swapdims(-1, -2)
@@ -124,4 +123,6 @@ class MultiDiscreteRolv(nn.Module):
         return self.distribution.sample()
 
     def entropy(self):
-        return self.distribution.entropy().sum(dim=-1) # Unsure about this sum operation.
+        return self.distribution.entropy().sum(
+            dim=-1
+        )  # Unsure about this sum operation.
