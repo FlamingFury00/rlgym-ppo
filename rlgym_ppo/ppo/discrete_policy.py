@@ -1,11 +1,3 @@
-"""
-File: discrete_policy.py
-Author: Matthew Allen
-
-Description:
-    An implementation of a feed-forward neural network which parametrizes a discrete distribution over a space of actions.
-"""
-
 import numpy as np
 import torch
 import torch.nn as nn
@@ -17,69 +9,78 @@ class DiscreteFF(nn.Module):
         self.device = device
 
         assert (
-            len(layer_sizes) != 0
-        ), "AT LEAST ONE LAYER MUST BE SPECIFIED TO BUILD THE NEURAL NETWORK!"
-        layers = [
-            nn.Linear(input_shape, layer_sizes[0]),
-            nn.LayerNorm(layer_sizes[0]),
-            nn.ReLU(),
-        ]  # Added LayerNorm
-        prev_size = layer_sizes[0]
-        for size in layer_sizes[1:]:
+            len(layer_sizes) > 0
+        ), "At least one layer must be specified to build the neural network!"
+
+        layers = []
+        prev_size = input_shape
+        for idx, size in enumerate(layer_sizes):
             layers.append(nn.Linear(prev_size, size))
-            layers.append(nn.LayerNorm(size))  # Added LayerNorm
-            layers.append(nn.ReLU())
+
+            # Apply Kaiming initialization to the layer
+            nn.init.kaiming_normal_(layers[-1].weight, nonlinearity="relu")
+
+            if idx < len(layer_sizes) - 1:
+                # Batch Normalization
+                layers.append(nn.BatchNorm1d(size))
+            layers.append(nn.ReLU(inplace=True))
+
             prev_size = size
 
         layers.append(nn.Linear(layer_sizes[-1], n_actions))
-        layers.append(nn.Softmax(dim=-1))
+        # Apply Kaiming initialization to the final layer
+        nn.init.kaiming_normal_(layers[-1].weight, nonlinearity="linear")
+
         self.model = nn.Sequential(*layers).to(self.device)
+
+        for i, layer in enumerate(self.model):
+            if hasattr(layer, "weight"):
+                print(f"Layer {i}: {layer} with weight shape {layer.weight.shape}")
 
         self.n_actions = n_actions
 
     def get_output(self, obs):
-        t = type(obs)
-        if t != torch.Tensor:
-            if t != np.array:
-                obs = np.asarray(obs)
-            obs = torch.as_tensor(obs, dtype=torch.float32, device=self.device)
+        # Ensure the input is a torch.Tensor
+        if not isinstance(obs, torch.Tensor):
+            obs = (
+                np.array(obs, dtype=np.float32)
+                if not isinstance(obs, np.ndarray)
+                else obs
+            )
+            obs = torch.tensor(
+                obs, dtype=torch.float32, device=self.model[0].weight.device
+            )
 
+        if obs.dim() == 3 and obs.shape[1] == 1:
+            obs = obs.squeeze(1)
+
+        # Perform the forward pass
         return self.model(obs)
 
     def get_action(self, obs, deterministic=False):
-        """
-        Function to get an action and the log of its probability from the policy given an observation.
-        :param obs: Observation to act on.
-        :param deterministic: Whether the action should be chosen deterministically.
-        :return: Chosen action and its logprob.
-        """
+        with torch.no_grad():
+            logits = self.get_output(obs)
+            probs = nn.functional.softmax(logits, dim=-1)
 
-        probs = self.get_output(obs)
-        probs = probs.view(-1, self.n_actions)
-        probs = torch.clamp(probs, min=1e-11, max=1)
+            if deterministic:
+                return probs.argmax(dim=-1).cpu().numpy(), torch.tensor(
+                    0, dtype=torch.float32
+                )
 
-        if deterministic:
-            return probs.cpu().numpy().argmax(), 0
+            distribution = torch.distributions.Categorical(probs)
+            action = distribution.sample()
+            log_prob = distribution.log_prob(action)
 
-        action = torch.multinomial(probs, 1, True)
-        log_prob = torch.log(probs).gather(-1, action)
-
-        return action.flatten().cpu(), log_prob.flatten().cpu()
+        return action.cpu(), log_prob.cpu()
 
     def get_backprop_data(self, obs, acts):
-        """
-        Function to compute the data necessary for backpropagation.
-        :param obs: Observations to pass through the policy.
-        :param acts: Actions taken by the policy.
-        :return: Action log probs & entropy.
-        """
-        acts = acts.long()
-        probs = self.get_output(obs)
-        probs = probs.view(-1, self.n_actions)
-        probs = torch.clamp(probs, min=1e-11, max=1)
+        logits = self.get_output(obs)
+        probs = nn.functional.softmax(logits, dim=-1)
 
         log_probs = torch.log(probs)
-        action_log_probs = log_probs.gather(-1, acts)
+
+        # Ensure acts is of type torch.int64 for gather
+        action_log_probs = log_probs.gather(-1, acts.long().unsqueeze(-1)).squeeze(-1)
         entropy = -(log_probs * probs).sum(dim=-1)
 
-        return action_log_probs.to(self.device), entropy.to(self.device).mean()
+        return action_log_probs.to(self.device), entropy.mean().to(self.device)

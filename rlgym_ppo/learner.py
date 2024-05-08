@@ -1,14 +1,5 @@
-"""
-File: learner.py
-Author: Matthew Allen
-
-Description:
-The primary algorithm file. The Learner object coordinates timesteps from the workers 
-and sends them to PPO, keeps track of the misc. variables and statistics for logging,
-reports to wandb and the console, and handles checkpointing.
-"""
-
 import json
+import logging
 import os
 import random
 import shutil
@@ -25,12 +16,16 @@ from rlgym_ppo.batched_agents import BatchedAgentManager
 from rlgym_ppo.ppo import ExperienceBuffer, PPOLearner
 from rlgym_ppo.util import KBHit, WelfordRunningStat, reporting, torch_functions
 
+# Configure the logger
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+
 
 class Learner(object):
     def __init__(
         self,
         env_create_function: Callable[..., gym.Gym],
-        metrics_logger: Union[None, object] = None,
+        metrics_logger=None,
         n_proc: int = 8,
         min_inference_size: int = 80,
         render: bool = False,
@@ -69,45 +64,31 @@ class Learner(object):
         n_checkpoints_to_keep: int = 5,
         shm_buffer_size: int = 8192,
         device: str = "auto",
-        use_mixed_precision: bool = False,
     ):
+
         assert (
             env_create_function is not None
-        ), "MUST PROVIDE A FUNCTION TO CREATE RLGYM FUNCTIONS TO INITIALIZE RLGYM-PPO"
+        ), "Must provide a function to create RLGYM functions to initialize RLGYM-PPO"
 
-        if checkpoints_save_folder is None:
-            checkpoints_save_folder = os.path.join(
-                "data", "checkpoints", "rlgym-ppo-run"
-            )
-
-        # Add the option for the user to turn off the addition of Unix Timestamps to
-        # the ``checkpoints_save_folder`` path
+        self.checkpoints_save_folder = checkpoints_save_folder or os.path.join(
+            "data", "checkpoints", "rlgym-ppo-run"
+        )
         if add_unix_timestamp:
-            checkpoints_save_folder = f"{checkpoints_save_folder}-{time.time_ns()}"
+            self.checkpoints_save_folder += f"-{time.time_ns()}"
 
         torch.manual_seed(random_seed)
         np.random.seed(random_seed)
         random.seed(random_seed)
 
         self.n_checkpoints_to_keep = n_checkpoints_to_keep
-        self.checkpoints_save_folder = checkpoints_save_folder
-        self.max_returns_per_stats_increment = max_returns_per_stats_increment
         self.metrics_logger = metrics_logger
         self.standardize_returns = standardize_returns
         self.save_every_ts = save_every_ts
         self.ts_since_last_save = 0
-        self.use_mixed_precision = use_mixed_precision
 
-        if device in {"auto", "gpu"} and torch.cuda.is_available():
-            self.device = "cuda:0"
-            torch.backends.cudnn.benchmark = True
-        elif device == "auto" and not torch.cuda.is_available():
-            self.device = "cpu"
-        else:
-            self.device = device
+        self.device = self._setup_device(device)
+        logger.info(f"Using device {self.device}")
 
-        print(f"Using device {self.device}")
-        self.exp_buffer_size = exp_buffer_size
         self.timestep_limit = timestep_limit
         self.ts_per_epoch = ts_per_iteration
         self.gae_lambda = gae_lambda
@@ -115,14 +96,19 @@ class Learner(object):
         self.return_stats = WelfordRunningStat(1)
         self.epoch = 0
 
-        self.experience_buffer = ExperienceBuffer(
-            self.exp_buffer_size, seed=random_seed, device="cpu"
-        )
+        self.policy_layer_sizes = policy_layer_sizes
+        self.critic_layer_sizes = critic_layer_sizes
 
-        print("Initializing processes...")
-        collect_metrics_fn = (
-            None if metrics_logger is None else self.metrics_logger.collect_metrics
+        self.policy_lr = policy_lr
+        self.critic_lr = critic_lr
+
+        self.max_returns_per_stats_increment = max_returns_per_stats_increment
+
+        self.experience_buffer = ExperienceBuffer(
+            exp_buffer_size, seed=random_seed, device="cpu"
         )
+        logger.info("Initializing processes...")
+
         self.agent = BatchedAgentManager(
             None,
             min_inference_size=min_inference_size,
@@ -133,14 +119,17 @@ class Learner(object):
         obs_space_size, act_space_size, action_space_type = self.agent.init_processes(
             n_processes=n_proc,
             build_env_fn=env_create_function,
-            collect_metrics_fn=collect_metrics_fn,
+            collect_metrics_fn=(
+                None if metrics_logger is None else metrics_logger.collect_metrics
+            ),
             spawn_delay=instance_launch_delay,
             render=render,
             render_delay=render_delay,
             shm_buffer_size=shm_buffer_size,
         )
         obs_space_size = np.prod(obs_space_size)
-        print("Initializing PPO...")
+
+        logger.info("Initializing PPO...")
         if ppo_minibatch_size is None:
             ppo_minibatch_size = ppo_batch_size
 
@@ -159,146 +148,133 @@ class Learner(object):
             critic_lr=critic_lr,
             clip_range=ppo_clip_range,
             ent_coef=ppo_ent_coef,
-            use_mixed_precision=self.use_mixed_precision,
         )
-
         self.agent.policy = self.ppo_learner.policy
 
-        self.config = {
-            "n_proc": n_proc,
-            "min_inference_size": min_inference_size,
-            "timestep_limit": timestep_limit,
-            "exp_buffer_size": exp_buffer_size,
-            "ts_per_iteration": ts_per_iteration,
-            "standardize_returns": standardize_returns,
-            "standardize_obs": standardize_obs,
-            "policy_layer_sizes": policy_layer_sizes,
-            "critic_layer_sizes": critic_layer_sizes,
-            "ppo_epochs": ppo_epochs,
-            "ppo_batch_size": ppo_batch_size,
-            "ppo_minibatch_size": ppo_minibatch_size,
-            "ppo_ent_coef": ppo_ent_coef,
-            "ppo_clip_range": ppo_clip_range,
-            "gae_lambda": gae_lambda,
-            "gae_gamma": gae_gamma,
-            "policy_lr": policy_lr,
-            "critic_lr": critic_lr,
-            "shm_buffer_size": shm_buffer_size,
-        }
-
-        self.wandb_run = wandb_run
-        wandb_loaded = checkpoint_load_folder is not None and self.load(
-            checkpoint_load_folder, load_wandb, policy_lr, critic_lr
+        self._initialize_wandb(
+            log_to_wandb,
+            load_wandb,
+            wandb_run,
+            wandb_project_name,
+            wandb_group_name,
+            wandb_run_name,
+            checkpoint_load_folder,
+            policy_lr,
+            critic_lr,
         )
 
+    def _setup_device(self, device):
+        if device in {"auto", "gpu"} and torch.cuda.is_available():
+            torch.backends.cudnn.benchmark = True
+            return "cuda:0"
+        elif device == "auto" and not torch.cuda.is_available():
+            return "cpu"
+        return device
+
+    def _initialize_wandb(
+        self,
+        log_to_wandb,
+        load_wandb,
+        wandb_run,
+        wandb_project_name,
+        wandb_group_name,
+        wandb_run_name,
+        checkpoint_load_folder,
+        policy_lr,
+        critic_lr,
+    ):
+        self.wandb_run = wandb_run
+        if checkpoint_load_folder:
+            wandb_loaded = self.load(
+                checkpoint_load_folder, load_wandb, policy_lr, critic_lr
+            )
+        else:
+            wandb_loaded = False
+
         if log_to_wandb and self.wandb_run is None and not wandb_loaded:
-            project = "rlgym-ppo" if wandb_project_name is None else wandb_project_name
-            group = "unnamed-runs" if wandb_group_name is None else wandb_group_name
-            run_name = "rlgym-ppo-run" if wandb_run_name is None else wandb_run_name
-            print("Attempting to create new wandb run...")
+            project = wandb_project_name or "rlgym-ppo"
+            group = wandb_group_name or "unnamed-runs"
+            run_name = wandb_run_name or "rlgym-ppo-run"
+            logger.info("Attempting to create new wandb run...")
             self.wandb_run = wandb.init(
                 project=project,
                 group=group,
-                config=self.config,
+                config=self._get_config(),
                 name=run_name,
                 reinit=True,
             )
-            print("Created new wandb run!", self.wandb_run.id)
-        print("Learner successfully initialized!")
+            logger.info(f"Created new wandb run! ID: {self.wandb_run.id}")
+        logger.info("Learner successfully initialized!")
 
-    def update_learning_rate(
-        self, new_policy_lr: float = None, new_critic_lr: float = None
-    ) -> None:
+    def _get_config(self):
+        return {
+            "min_inference_size": self.agent.min_inference_size,
+            "timestep_limit": self.timestep_limit,
+            "ts_per_iteration": self.ts_per_epoch,
+            "standardize_returns": self.standardize_returns,
+            "standardize_obs": self.agent.standardize_obs,
+            "policy_layer_sizes": self.policy_layer_sizes,
+            "critic_layer_sizes": self.critic_layer_sizes,
+            "ppo_epochs": self.ppo_learner.n_epochs,
+            "ppo_batch_size": self.ppo_learner.batch_size,
+            "ppo_minibatch_size": self.ppo_learner.mini_batch_size,
+            "ppo_ent_coef": self.ppo_learner.ent_coef,
+            "ppo_clip_range": self.ppo_learner.clip_range,
+            "gae_lambda": self.gae_lambda,
+            "gae_gamma": self.gae_gamma,
+            "policy_lr": self.policy_lr,
+            "critic_lr": self.critic_lr,
+        }
+
+    def update_learning_rate(self, new_policy_lr=None, new_critic_lr=None):
         if new_policy_lr is not None:
-            self.policy_lr = new_policy_lr
+            self.ppo_learner.policy_lr = new_policy_lr
             for param_group in self.ppo_learner.policy_optimizer.param_groups:
                 param_group["lr"] = new_policy_lr
-            print(f"New policy learning rate: {new_policy_lr}")
+            logger.info(f"New policy learning rate: {new_policy_lr}")
 
         if new_critic_lr is not None:
-            self.critic_lr = new_critic_lr
+            self.ppo_learner.critic_lr = new_critic_lr
             for param_group in self.ppo_learner.value_optimizer.param_groups:
                 param_group["lr"] = new_critic_lr
-            print(f"New policy learning rate: {new_critic_lr}")
+            logger.info(f"New critic learning rate: {new_critic_lr}")
 
-    def learn(self) -> None:
-        """
-        Function to wrap the _learn function in a try/catch/finally
-        block to ensure safe execution and error handling.
-        """
+    def learn(self):
         try:
             self._learn()
         except Exception:
-            import traceback
-
-            print("\n\nLEARNING LOOP ENCOUNTERED AN ERROR\n")
-            traceback.print_exc()
-
+            logger.error("LEARNING LOOP ENCOUNTERED AN ERROR", exc_info=True)
             try:
                 self.save(self.agent.cumulative_timesteps)
-            except:
-                print("FAILED TO SAVE ON EXIT")
-
+            except Exception:
+                logger.error("FAILED TO SAVE ON EXIT", exc_info=True)
         finally:
             self.cleanup()
 
-    def _learn(self) -> None:
-        """
-        Learning function. This is where the magic happens.
-        """
-
-        def handle_keyboard_input() -> None:
-            if kb.kbhit():
-                c = kb.getch()
-                if c == "p":  # pause
-                    print("Paused, press any key to resume")
-                    while True:
-                        if kb.kbhit():
-                            break
-                if c in ("c", "q"):
-                    self.save(self.agent.cumulative_timesteps)
-                if c == "q":
-                    return
-                if c in ("c", "p"):
-                    print("Resuming...\n")
-
-        # Class to watch for keyboard hits
+    def _learn(self):
         kb = KBHit()
-        print(
-            "Press (p) to pause (c) to checkpoint, (q) to checkpoint and quit (after next iteration)\n"
+        logger.info(
+            "Press (p) to pause, (c) to checkpoint, (q) to checkpoint and quit (after next iteration)\n"
         )
 
-        # While the number of timesteps we have collected so far is less than the
-        # amount we are allowed to collect.
         while self.agent.cumulative_timesteps < self.timestep_limit:
             epoch_start = time.perf_counter()
             report = {}
 
-            # Collect the desired number of timesteps from our agent.
             experience, collected_metrics, steps_collected, collection_time = (
                 self.agent.collect_timesteps(self.ts_per_epoch)
             )
-
             if self.metrics_logger is not None:
                 self.metrics_logger.report_metrics(
                     collected_metrics, self.wandb_run, self.agent.cumulative_timesteps
                 )
 
-            # Add the new experience to our buffer and compute the various
-            # reinforcement learning quantities we need to
-            # learn from (advantages, values, returns).
             self.add_new_experience(experience)
-
-            # Let PPO compute updates using our experience buffer.
             ppo_report = self.ppo_learner.learn(self.experience_buffer)
             epoch_stop = time.perf_counter()
             epoch_time = epoch_stop - epoch_start
 
-            # Report variables we care about.
             report.update(ppo_report)
-            if self.epoch < 1:
-                report["Value Function Loss"] = np.nan
-
             report["Cumulative Timesteps"] = self.agent.cumulative_timesteps
             report["Total Iteration Time"] = epoch_time
             report["Timesteps Collected"] = steps_collected
@@ -308,26 +284,31 @@ class Learner(object):
             report["Overall Steps per Second"] = steps_collected / epoch_time
 
             self.ts_since_last_save += steps_collected
-            if self.agent.average_reward is not None:
-                report["Policy Reward"] = self.agent.average_reward
-            else:
-                report["Policy Reward"] = np.nan
+            report["Policy Reward"] = (
+                self.agent.average_reward
+                if self.agent.average_reward is not None
+                else np.nan
+            )
 
-            # Log to wandb and print to the console.
             reporting.report_metrics(
                 loggable_metrics=report, debug_metrics=None, wandb_run=self.wandb_run
             )
 
-            report.clear()
-            ppo_report.clear()
-
             if "cuda" in self.device:
                 torch.cuda.empty_cache()
 
-            # Check for keyboard input
-            handle_keyboard_input()
+            if kb.kbhit():
+                c = kb.getch()
+                if c == "p":  # pause
+                    logger.info("Paused, press any key to resume")
+                    kb.wait_for_keypress()
+                if c in ("c", "q"):  # checkpoint and possibly quit
+                    self.save(self.agent.cumulative_timesteps)
+                if c == "q":  # quit
+                    break
+                if c == "c":  # continue
+                    logger.info("Resuming...\n")
 
-            # Save if we've reached the next checkpoint timestep.
             if self.ts_since_last_save >= self.save_every_ts:
                 self.save(self.agent.cumulative_timesteps)
                 self.ts_since_last_save = 0
@@ -335,31 +316,10 @@ class Learner(object):
             self.epoch += 1
 
     @torch.no_grad()
-    def add_new_experience(self, experience: tuple) -> None:
-        """
-        Function to add timesteps to our experience buffer and compute the advantage
-        function estimates, value function
-        estimates, and returns.
-        :param experience: tuple containing
-        (experience, steps_collected, collection_time) from an agent.
-        """
-
-        # Unpack timestep data.
+    def add_new_experience(self, experience):
         states, actions, log_probs, rewards, next_states, dones, truncated = experience
-        value_net = self.ppo_learner.value_net
-
-        # Convert NumPy arrays to PyTorch tensors
-        states = torch.as_tensor(states, dtype=torch.float32, device=self.device)
-        next_states = torch.as_tensor(
-            next_states, dtype=torch.float32, device=self.device
-        )
-
-        # Compute the value predictions directly on the GPU
-        val_inp = torch.cat([states, next_states[-1:]], dim=0).to(self.device)
-        val_preds = value_net(val_inp).cpu().flatten().tolist()
-
-        # Compute the desired reinforcement learning quantities.
-        ret_std = self.return_stats.std[0] if self.standardize_returns else None
+        val_inp = np.vstack([states, next_states[-1:]])
+        val_preds = self.ppo_learner.value_net(val_inp).cpu().flatten().numpy()
 
         value_targets, advantages, returns = torch_functions.compute_gae(
             rewards,
@@ -368,16 +328,15 @@ class Learner(object):
             val_preds,
             gamma=self.gae_gamma,
             lmbda=self.gae_lambda,
-            return_std=ret_std,  # 1 by default if no standardization is requested
+            return_std=self.return_stats.std[0] if self.standardize_returns else None,
         )
 
-        if self.standardize_returns:
-            # Update the running statistics about the returns.
-            n_to_increment = min(self.max_returns_per_stats_increment, len(returns))
+        if self.standardize_returns and len(returns) > 0:
+            self.return_stats.increment(
+                returns[: min(self.max_returns_per_stats_increment, len(returns))],
+                min(self.max_returns_per_stats_increment, len(returns)),
+            )
 
-            self.return_stats.increment(returns[:n_to_increment], n_to_increment)
-
-        # Add our new experience to the buffer.
         self.experience_buffer.submit_experience(
             states,
             actions,
@@ -390,35 +349,24 @@ class Learner(object):
             advantages,
         )
 
-    def save(self, cumulative_timesteps: int) -> None:
-        """
-        Function to save a checkpoint.
-        :param cumulative_timesteps: Number of timesteps that have passed so far in the
-        learning algorithm.
-        """
-
-        # Make the file path to which the checkpoint will be saved
+    def save(self, cumulative_timesteps):
         folder_path = os.path.join(
             self.checkpoints_save_folder, str(cumulative_timesteps)
         )
         os.makedirs(folder_path, exist_ok=True)
 
-        # Check to see if we've run out of checkpoint space and remove the oldest
-        # checkpoints
-        print(f"Saving checkpoint {cumulative_timesteps}...")
-        existing_checkpoints = [
-            int(arg) for arg in os.listdir(self.checkpoints_save_folder)
-        ]
+        logger.info(f"Saving checkpoint {cumulative_timesteps}...")
+        existing_checkpoints = sorted(
+            int(name)
+            for name in os.listdir(self.checkpoints_save_folder)
+            if name.isdigit()
+        )
         if len(existing_checkpoints) > self.n_checkpoints_to_keep:
-            existing_checkpoints.sort()
-            for checkpoint_name in existing_checkpoints[: -self.n_checkpoints_to_keep]:
+            for old_checkpoint in existing_checkpoints[: -self.n_checkpoints_to_keep]:
                 shutil.rmtree(
-                    os.path.join(self.checkpoints_save_folder, str(checkpoint_name))
+                    os.path.join(self.checkpoints_save_folder, str(old_checkpoint))
                 )
 
-        os.makedirs(folder_path, exist_ok=True)
-
-        # Save all the things that need saving.
         self.ppo_learner.save_to(folder_path)
 
         book_keeping_vars = {
@@ -429,72 +377,53 @@ class Learner(object):
             "ts_since_last_save": self.ts_since_last_save,
             "reward_running_stats": self.return_stats.to_json(),
         }
+
         if self.agent.standardize_obs:
             book_keeping_vars["obs_running_stats"] = self.agent.obs_stats.to_json()
         if self.standardize_returns:
             book_keeping_vars["reward_running_stats"] = self.return_stats.to_json()
 
-        if self.wandb_run is not None:
-            book_keeping_vars["wandb_run_id"] = self.wandb_run.id
-            book_keeping_vars["wandb_project"] = self.wandb_run.project
-            book_keeping_vars["wandb_entity"] = self.wandb_run.entity
-            book_keeping_vars["wandb_group"] = self.wandb_run.group
-            book_keeping_vars["wandb_config"] = self.wandb_run.config.as_dict()
+        if self.wandb_run:
+            book_keeping_vars.update(
+                {
+                    "wandb_run_id": self.wandb_run.id,
+                    "wandb_project": self.wandb_run.project,
+                    "wandb_entity": self.wandb_run.entity,
+                    "wandb_group": self.wandb_run.group,
+                    "wandb_config": self.wandb_run.config.as_dict(),
+                }
+            )
 
-        book_keeping_table_path = os.path.join(folder_path, "BOOK_KEEPING_VARS.json")
-        with open(book_keeping_table_path, "w") as f:
+        with open(os.path.join(folder_path, "BOOK_KEEPING_VARS.json"), "w") as f:
             json.dump(book_keeping_vars, f, indent=4)
 
-        print(f"Checkpoint {cumulative_timesteps} saved!\n")
+        logger.info(f"Checkpoint {cumulative_timesteps} saved!\n")
 
-    def load(
-        self,
-        folder_path: str,
-        load_wandb: bool,
-        new_policy_lr: float = None,
-        new_critic_lr: float = None,
-    ) -> bool:
-        """
-        Function to load the learning algorithm from a checkpoint.
+    def load(self, folder_path, load_wandb, new_policy_lr=None, new_critic_lr=None):
+        assert os.path.exists(folder_path), f"Unable to locate folder {folder_path}"
+        logger.info(f"Loading from checkpoint at {folder_path}")
 
-        :param folder_path: Path to the checkpoint folder that will be loaded.
-        :param load_wandb: Whether to resume an existing weights and biases run that
-        was saved with the checkpoint being loaded.
-        :return: bool indicating whether a wandb run was loaded successfully.
-        """
-
-        # Make sure the folder exists.
-        assert os.path.exists(folder_path), f"UNABLE TO LOCATE FOLDER {folder_path}"
-        print(f"Loading from checkpoint at {folder_path}")
-
-        # Load stuff.
         self.ppo_learner.load_from(folder_path)
-
-        wandb_loaded = False
         with open(os.path.join(folder_path, "BOOK_KEEPING_VARS.json"), "r") as f:
-            book_keeping_vars = dict(json.load(f))
-            self.agent.cumulative_timesteps = book_keeping_vars["cumulative_timesteps"]
-            self.agent.average_reward = book_keeping_vars["policy_average_reward"]
-            self.ppo_learner.cumulative_model_updates = book_keeping_vars[
-                "cumulative_model_updates"
-            ]
-            self.return_stats.from_json(book_keeping_vars["reward_running_stats"])
+            book_keeping_vars = json.load(f)
+            self.agent.cumulative_timesteps = book_keeping_vars.get(
+                "cumulative_timesteps", 0
+            )
+            self.agent.average_reward = book_keeping_vars.get("policy_average_reward")
+            self.ppo_learner.cumulative_model_updates = book_keeping_vars.get(
+                "cumulative_model_updates", 0
+            )
+            self.return_stats.from_json(
+                book_keeping_vars.get("reward_running_stats", "{}")
+            )
 
-            if (
-                self.agent.standardize_obs
-                and "obs_running_stats" in book_keeping_vars.keys()
-            ):
-                self.agent.obs_stats = WelfordRunningStat(1)
+            if self.agent.standardize_obs and "obs_running_stats" in book_keeping_vars:
                 self.agent.obs_stats.from_json(book_keeping_vars["obs_running_stats"])
-            if (
-                self.standardize_returns
-                and "reward_running_stats" in book_keeping_vars.keys()
-            ):
+            if self.standardize_returns and "reward_running_stats" in book_keeping_vars:
                 self.return_stats.from_json(book_keeping_vars["reward_running_stats"])
 
-            self.epoch = book_keeping_vars["epoch"]
+            self.epoch = book_keeping_vars.get("epoch", 0)
 
-            # Update learning rates if new values are provided
             if new_policy_lr is not None or new_critic_lr is not None:
                 self.update_learning_rate(new_policy_lr, new_critic_lr)
 
@@ -505,21 +434,16 @@ class Learner(object):
                     project=book_keeping_vars["wandb_project"],
                     group=book_keeping_vars["wandb_group"],
                     id=book_keeping_vars["wandb_run_id"],
-                    config=book_keeping_vars["wandb_config"],
+                    config=book_keeping_vars.get("wandb_config", {}),
                     resume="allow",
                     reinit=True,
                 )
-                wandb_loaded = True
+                return True
+        logger.info("Checkpoint loaded!")
+        return False
 
-        print("Checkpoint loaded!")
-        return wandb_loaded
-
-    def cleanup(self) -> None:
-        """
-        Function to clean everything up before shutting down.
-        """
-
-        if self.wandb_run is not None:
+    def cleanup(self):
+        if self.wandb_run:
             self.wandb_run.finish()
         if isinstance(self.agent, BatchedAgentManager):
             self.agent.cleanup()
