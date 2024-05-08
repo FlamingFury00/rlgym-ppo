@@ -33,10 +33,6 @@ class DiscreteFF(nn.Module):
 
         self.model = nn.Sequential(*layers).to(self.device)
 
-        for i, layer in enumerate(self.model):
-            if hasattr(layer, "weight"):
-                print(f"Layer {i}: {layer} with weight shape {layer.weight.shape}")
-
         self.n_actions = n_actions
 
     def get_output(self, obs):
