@@ -17,48 +17,23 @@ class ValueEstimator(nn.Module):
         self.device = device
 
         assert (
-            len(layer_sizes) > 0
-        ), "At least one layer must be specified to build the neural network!"
+            len(layer_sizes) != 0
+        ), "AT LEAST ONE LAYER MUST BE SPECIFIED TO BUILD THE NEURAL NETWORK!"
+        layers = [nn.Linear(input_shape, layer_sizes[0]), nn.ReLU(True)]
 
-        layers = []
-        prev_size = input_shape
-        for idx, size in enumerate(layer_sizes):
+        prev_size = layer_sizes[0]
+        for size in layer_sizes[1:]:
             layers.append(nn.Linear(prev_size, size))
-
-            # Apply Kaiming initialization to the layer
-            nn.init.kaiming_normal_(layers[-1].weight, nonlinearity="relu")
-
-            if idx < len(layer_sizes) - 1:
-                # Batch Normalization
-                layers.append(nn.BatchNorm1d(size))
-            layers.append(nn.ReLU(inplace=True))
-
+            layers.append(nn.ReLU(True))
             prev_size = size
 
         layers.append(nn.Linear(layer_sizes[-1], 1))
-        # Apply Kaiming initialization to the final layer
-        nn.init.kaiming_normal_(layers[-1].weight, nonlinearity="linear")
-
         self.model = nn.Sequential(*layers).to(self.device)
 
     def forward(self, x):
-        """
-        Forward pass of the network. Accepts input data and outputs the corresponding prediction.
-
-        Parameters:
-        x (torch.Tensor, numpy.ndarray, or list): The input data.
-
-        Returns:
-        torch.Tensor: The output from the network.
-        """
-        # Ensure the input is a torch.Tensor
-        if not isinstance(x, torch.Tensor):
-            # Convert input to numpy array if it's a list, then to a tensor
-            x = np.array(x, dtype=np.float32) if not isinstance(x, np.ndarray) else x
-            x = torch.tensor(x, dtype=torch.float32, device=self.model[0].weight.device)
-
-        if x.dim() == 3 and x.size(1) == 1:
-            x = x.squeeze(1)
-
-        # Perform the forward pass
+        t = type(x)
+        if t != torch.Tensor:
+            if t != np.array:
+                x = np.asarray(x)
+            x = torch.as_tensor(x, dtype=torch.float32, device=self.device)
         return self.model(x)
