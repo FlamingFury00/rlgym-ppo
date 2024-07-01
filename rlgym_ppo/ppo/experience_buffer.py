@@ -10,7 +10,6 @@ Description:
 
 import numpy as np
 import torch
-import time
 
 
 class ExperienceBuffer(object):
@@ -26,7 +25,7 @@ class ExperienceBuffer(object):
 
         elif len(t1) + len(t2) > size:
             # t1+t2 is larger than we want; use t2 wholly with the end of t1 before it
-            t = torch.cat((t1[len(t2) - size:], t2), 0)
+            t = torch.cat((t1[len(t2) - size :], t2), 0)
 
         else:
             # t1+t2 does not exceed what we want; concatenate directly
@@ -51,7 +50,18 @@ class ExperienceBuffer(object):
         self.max_size = max_size
         self.rng = np.random.RandomState(seed)
 
-    def submit_experience(self, states, actions, log_probs, rewards, next_states, dones, truncated, values, advantages):
+    def submit_experience(
+        self,
+        states,
+        actions,
+        log_probs,
+        rewards,
+        next_states,
+        dones,
+        truncated,
+        values,
+        advantages,
+    ):
         """
         Function to add experience to the buffer.
 
@@ -69,22 +79,60 @@ class ExperienceBuffer(object):
         """
 
         _cat = ExperienceBuffer._cat
-        self.states = _cat(self.states, torch.as_tensor(states, dtype=torch.float32, device=self.device), self.max_size)
-        self.actions = _cat(self.actions, torch.as_tensor(actions, dtype=torch.float32, device=self.device), self.max_size)
-        self.log_probs = _cat(self.log_probs, torch.as_tensor(log_probs, dtype=torch.float32, device=self.device), self.max_size)
-        self.rewards = _cat(self.rewards, torch.as_tensor(rewards, dtype=torch.float32, device=self.device), self.max_size)
-        self.next_states = _cat(self.next_states, torch.as_tensor(next_states, dtype=torch.float32, device=self.device), self.max_size)
-        self.dones = _cat(self.dones, torch.as_tensor(dones, dtype=torch.float32, device=self.device), self.max_size)
-        self.truncated = _cat(self.truncated, torch.as_tensor(truncated, dtype=torch.float32, device=self.device), self.max_size)
-        self.values = _cat(self.values, torch.as_tensor(values, dtype=torch.float32, device=self.device), self.max_size)
-        self.advantages = _cat(self.advantages, torch.as_tensor(advantages, dtype=torch.float32, device=self.device), self.max_size)
+        self.states = _cat(
+            self.states,
+            torch.as_tensor(states, dtype=torch.float32, device=self.device),
+            self.max_size,
+        )
+        self.actions = _cat(
+            self.actions,
+            torch.as_tensor(actions, dtype=torch.float32, device=self.device),
+            self.max_size,
+        )
+        self.log_probs = _cat(
+            self.log_probs,
+            torch.as_tensor(log_probs, dtype=torch.float32, device=self.device),
+            self.max_size,
+        )
+        self.rewards = _cat(
+            self.rewards,
+            torch.as_tensor(rewards, dtype=torch.float32, device=self.device),
+            self.max_size,
+        )
+        self.next_states = _cat(
+            self.next_states,
+            torch.as_tensor(next_states, dtype=torch.float32, device=self.device),
+            self.max_size,
+        )
+        self.dones = _cat(
+            self.dones,
+            torch.as_tensor(dones, dtype=torch.float32, device=self.device),
+            self.max_size,
+        )
+        self.truncated = _cat(
+            self.truncated,
+            torch.as_tensor(truncated, dtype=torch.float32, device=self.device),
+            self.max_size,
+        )
+        self.values = _cat(
+            self.values,
+            torch.as_tensor(values, dtype=torch.float32, device=self.device),
+            self.max_size,
+        )
+        self.advantages = _cat(
+            self.advantages,
+            torch.as_tensor(advantages, dtype=torch.float32, device=self.device),
+            self.max_size,
+        )
 
     def _get_samples(self, indices):
-        return (self.actions[indices],
-                self.log_probs[indices],
-                self.states[indices],
-                self.values[indices],
-                self.advantages[indices])
+        return (
+            self.actions[indices],
+            self.log_probs[indices],
+            self.states[indices],
+            self.values[indices],
+            self.advantages[indices],
+        )
 
     def get_all_batches_shuffled(self, batch_size):
         """
@@ -98,7 +146,7 @@ class ExperienceBuffer(object):
         indices = self.rng.permutation(total_samples)
         start_idx = 0
         while start_idx + batch_size <= total_samples:
-            yield self._get_samples(indices[start_idx: start_idx + batch_size])
+            yield self._get_samples(indices[start_idx : start_idx + batch_size])
             start_idx += batch_size
 
     def clear(self):

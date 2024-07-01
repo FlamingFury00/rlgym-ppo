@@ -1,13 +1,29 @@
-"""
-File: value_estimator.py
-Author: Matthew Allen
-
-Description:
-    An implementation of a feed-forward neural network which models the value function of a policy.
-"""
-import torch.nn as nn
-import torch
 import numpy as np
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+
+
+class AttentionModule(nn.Module):
+    def __init__(self, input_dim, hidden_dim):
+        super().__init__()
+        self.query = nn.Linear(input_dim, hidden_dim)
+        self.key = nn.Linear(input_dim, hidden_dim)
+        self.value = nn.Linear(input_dim, hidden_dim)
+
+    def forward(self, x):
+        if x.dim() == 2:
+            x = x.unsqueeze(1)
+
+        q = self.query(x)
+        k = self.key(x)
+        v = self.value(x)
+
+        attn_scores = torch.bmm(q, k.transpose(1, 2)) / np.sqrt(k.size(-1))
+        attn_weights = F.softmax(attn_scores, dim=-1)
+        attn_output = torch.bmm(attn_weights, v)
+
+        return attn_output.squeeze(1)
 
 
 class ValueEstimator(nn.Module):
@@ -15,22 +31,21 @@ class ValueEstimator(nn.Module):
         super().__init__()
         self.device = device
 
-        assert len(layer_sizes) != 0, "AT LEAST ONE LAYER MUST BE SPECIFIED TO BUILD THE NEURAL NETWORK!"
-        layers = [nn.Linear(input_shape, layer_sizes[0]), nn.ReLU()]
+        self.attention = AttentionModule(input_shape, layer_sizes[0])
 
+        layers = []
         prev_size = layer_sizes[0]
         for size in layer_sizes[1:]:
             layers.append(nn.Linear(prev_size, size))
             layers.append(nn.ReLU())
             prev_size = size
 
-        layers.append(nn.Linear(layer_sizes[-1], 1))
+        layers.append(nn.Linear(prev_size, 1))
+
         self.model = nn.Sequential(*layers).to(self.device)
 
     def forward(self, x):
-        t = type(x)
-        if t != torch.Tensor:
-            if t != np.array:
-                x = np.asarray(x)
+        if not isinstance(x, torch.Tensor):
             x = torch.as_tensor(x, dtype=torch.float32, device=self.device)
-        return self.model(x)
+        attn_output = self.attention(x)
+        return self.model(attn_output)
