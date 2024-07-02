@@ -110,7 +110,7 @@ if __name__ == "__main__":
         metrics_logger=metrics_logger,
         ppo_batch_size=50000,
         ts_per_iteration=50000,
-        exp_buffer_size=1048576,
+        exp_buffer_size=1500000,
         ppo_minibatch_size=50000,
         ppo_ent_coef=0.001,
         ppo_epochs=1,

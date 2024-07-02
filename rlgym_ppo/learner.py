@@ -22,8 +22,7 @@ from rlgym_sim import gym
 from wandb.wandb_run import Run
 
 from rlgym_ppo.batched_agents import BatchedAgentManager
-from rlgym_ppo.ppo import PPOLearner
-from rlgym_ppo.ppo.experience_buffer import PrioritizedExperienceBuffer
+from rlgym_ppo.ppo import ExperienceBuffer, PPOLearner
 from rlgym_ppo.util import KBHit, WelfordRunningStat, reporting, torch_functions
 
 
@@ -123,13 +122,9 @@ class Learner(object):
         self.return_stats = WelfordRunningStat(1)
         self.epoch = 0
 
-        self.experience_buffer = PrioritizedExperienceBuffer(
-            self.exp_buffer_size, seed=random_seed, device="cpu", alpha=0.6
+        self.experience_buffer = ExperienceBuffer(
+            self.exp_buffer_size, seed=random_seed, device="cpu"
         )
-
-        # Add beta parameter for PER
-        self.per_beta = 0.4
-        self.per_beta_increment = 0.001
 
         print("Initializing processes...")
         collect_metrics_fn = (
@@ -272,28 +267,7 @@ class Learner(object):
 
             self.add_new_experience(experience)
 
-            # Sample from prioritized experience buffer
-            (actions, log_probs, states, values, advantages, weights, indices) = (
-                self.experience_buffer.sample(
-                    self.ppo_learner.batch_size, beta=self.per_beta
-                )
-            )
-
-            # Update beta
-            self.per_beta = min(1.0, self.per_beta + self.per_beta_increment)
-
-            # Modify PPO learning to use importance sampling weights
-            ppo_report = self.ppo_learner.learn(
-                actions, log_probs, states, values, advantages, weights
-            )
-
-            # Calculate TD errors and update priorities
-            with torch.no_grad():
-                new_values = self.ppo_learner.value_net(states).squeeze()
-                td_errors = torch.abs(new_values - values.to(self.device)).cpu().numpy()
-
-            self.experience_buffer.update_priorities(indices, td_errors + 1e-5)
-
+            ppo_report = self.ppo_learner.learn(self.experience_buffer)
             epoch_stop = time.perf_counter()
             epoch_time = epoch_stop - epoch_start
 

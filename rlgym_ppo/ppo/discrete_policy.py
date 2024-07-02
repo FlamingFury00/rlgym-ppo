@@ -1,3 +1,4 @@
+import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -18,9 +19,7 @@ class AttentionModule(nn.Module):
         k = self.key(x)
         v = self.value(x)
 
-        attn_scores = torch.bmm(q, k.transpose(1, 2)) / torch.sqrt(
-            torch.tensor(k.size(-1), dtype=torch.float32, device=x.device)
-        )
+        attn_scores = torch.bmm(q, k.transpose(1, 2)) / np.sqrt(k.size(-1))
         attn_weights = F.softmax(attn_scores, dim=-1)
         attn_output = torch.bmm(attn_weights, v)
 
@@ -69,16 +68,6 @@ class ImprovedDiscreteFF(nn.Module):
         probs = torch.clamp(probs, min=1e-8, max=1 - 1e-8)
 
         log_probs = torch.log(probs)
-
-        # Ensure acts has the correct shape for gathering
-        if acts.dim() == 1:
-            acts = acts.unsqueeze(-1)
-
-        # Ensure log_probs and acts have compatible dimensions
-        if log_probs.dim() == 3 and acts.dim() == 2:
-            log_probs = log_probs.view(-1, log_probs.size(-1))
-            acts = acts.view(-1, 1)
-
         action_log_probs = log_probs.gather(-1, acts)
         entropy = -(log_probs * probs).sum(dim=-1)
 
@@ -95,25 +84,27 @@ class DiscreteFF(nn.Module):
         self.improved_ff = ImprovedDiscreteFF(
             layer_sizes[0], n_actions, layer_sizes[1:], device
         )
-        self.to(self.device)  # Move the entire model to the specified device
 
     def forward(self, obs):
-        obs = torch.as_tensor(obs, dtype=torch.float32, device=self.device)
+        if not isinstance(obs, torch.Tensor):
+            obs = torch.as_tensor(obs, dtype=torch.float32, device=self.device)
         attn_output = self.attention(obs)
         return self.improved_ff(attn_output)
 
     def get_action(self, obs, deterministic=False):
-        obs = torch.as_tensor(obs, dtype=torch.float32, device=self.device)
+        if not isinstance(obs, torch.Tensor):
+            obs = torch.as_tensor(obs, dtype=torch.float32, device=self.device)
         attn_output = self.attention(obs)
         return self.improved_ff.get_action(attn_output, deterministic)
 
     def get_output(self, obs):
-        obs = torch.as_tensor(obs, dtype=torch.float32, device=self.device)
+        if not isinstance(obs, torch.Tensor):
+            obs = torch.as_tensor(obs, dtype=torch.float32, device=self.device)
         attn_output = self.attention(obs)
         return self.improved_ff.get_output(attn_output)
 
     def get_backprop_data(self, obs, acts):
-        obs = torch.as_tensor(obs, dtype=torch.float32, device=self.device)
-        acts = torch.as_tensor(acts, dtype=torch.long, device=self.device)
+        if not isinstance(obs, torch.Tensor):
+            obs = torch.as_tensor(obs, dtype=torch.float32, device=self.device)
         attn_output = self.attention(obs)
         return self.improved_ff.get_backprop_data(attn_output, acts)
