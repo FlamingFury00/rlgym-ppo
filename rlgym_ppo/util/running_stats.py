@@ -35,16 +35,12 @@ class WelfordRunningStat(object):
             self.update(samples)
 
     def update(self, sample):
-        if isinstance(sample, dict):
+        if type(sample) is dict:
             sample = sample["frame"]
-
-        # Ensure sample has the correct shape
-        sample = np.asarray(sample).reshape(self.shape)
-
         current_count = self.count
         self.count += 1
-        delta = sample - self.running_mean
-        delta_n = delta / self.count
+        delta = (sample - self.running_mean).reshape(self.running_mean.shape)
+        delta_n = (delta / self.count).reshape(self.running_mean.shape)
 
         self.running_mean += delta_n
         self.running_variance += delta * delta_n * current_count

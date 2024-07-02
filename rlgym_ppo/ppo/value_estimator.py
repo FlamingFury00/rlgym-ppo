@@ -1,4 +1,3 @@
-import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -19,7 +18,9 @@ class AttentionModule(nn.Module):
         k = self.key(x)
         v = self.value(x)
 
-        attn_scores = torch.bmm(q, k.transpose(1, 2)) / np.sqrt(k.size(-1))
+        attn_scores = torch.bmm(q, k.transpose(1, 2)) / torch.sqrt(
+            torch.tensor(k.size(-1), dtype=torch.float32, device=x.device)
+        )
         attn_weights = F.softmax(attn_scores, dim=-1)
         attn_output = torch.bmm(attn_weights, v)
 
@@ -42,10 +43,10 @@ class ValueEstimator(nn.Module):
 
         layers.append(nn.Linear(prev_size, 1))
 
-        self.model = nn.Sequential(*layers).to(self.device)
+        self.model = nn.Sequential(*layers)
+        self.to(self.device)  # Move the entire model to the specified device
 
     def forward(self, x):
-        if not isinstance(x, torch.Tensor):
-            x = torch.as_tensor(x, dtype=torch.float32, device=self.device)
+        x = torch.as_tensor(x, dtype=torch.float32, device=self.device)
         attn_output = self.attention(x)
         return self.model(attn_output)

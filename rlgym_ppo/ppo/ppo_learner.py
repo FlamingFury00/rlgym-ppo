@@ -27,10 +27,8 @@ class PPOLearner(object):
         ent_coef,
         mini_batch_size,
         device,
-        num_envs=8,  # Number of parallel environments
     ):
         self.device = device
-        self.num_envs = num_envs
 
         assert (
             batch_size % mini_batch_size == 0
@@ -109,7 +107,7 @@ class PPOLearner(object):
         print(f"Current Policy Learning Rate: {policy_lr}")
         print(f"Current Critic Learning Rate: {critic_lr}")
 
-    def learn(self, exp):
+    def learn(self, actions, log_probs, states, values, advantages, weights):
         n_iterations = 0
         n_minibatch_iterations = 0
         mean_entropy = 0
@@ -126,83 +124,80 @@ class PPOLearner(object):
 
         t1 = time.time()
         for epoch in range(self.n_epochs):
-            batches = exp.get_all_batches_shuffled(self.batch_size)
-            for batch in batches:
-                (
-                    batch_acts,
-                    batch_old_probs,
-                    batch_obs,
-                    batch_target_values,
-                    batch_advantages,
-                ) = batch
-                batch_acts = batch_acts.view(self.batch_size, -1).to(self.device)
-                batch_obs = batch_obs.to(self.device)
-                batch_advantages = batch_advantages.to(self.device)
-                batch_old_probs = batch_old_probs.to(self.device)
-                batch_target_values = batch_target_values.to(self.device)
+            # Shuffle the data
+            permutation = torch.randperm(self.batch_size)
+            actions = actions[permutation]
+            log_probs = log_probs[permutation]
+            states = states[permutation]
+            values = values[permutation]
+            advantages = advantages[permutation]
+            weights = weights[permutation]
 
-                for minibatch_slice in range(0, self.batch_size, self.mini_batch_size):
-                    start = minibatch_slice
-                    stop = start + self.mini_batch_size
+            for minibatch_slice in range(0, self.batch_size, self.mini_batch_size):
+                start = minibatch_slice
+                stop = start + self.mini_batch_size
 
-                    acts = batch_acts[start:stop]
-                    obs = batch_obs[start:stop]
-                    advantages = batch_advantages[start:stop]
-                    old_probs = batch_old_probs[start:stop]
-                    target_values = batch_target_values[start:stop]
+                mb_actions = actions[start:stop].to(self.device)
+                mb_log_probs = log_probs[start:stop].to(self.device)
+                mb_states = states[start:stop].to(self.device)
+                mb_values = values[start:stop].to(self.device)
+                mb_advantages = advantages[start:stop].to(self.device)
+                mb_weights = weights[start:stop].to(self.device)
 
-                    with autocast(False):
-                        vals = self.value_net(obs).view_as(target_values)
-                        log_probs, entropy = self.policy.get_backprop_data(obs, acts)
-                        log_probs = log_probs.view_as(old_probs)
+                with autocast(False):
+                    new_values = self.value_net(mb_states).view_as(mb_values)
+                    new_log_probs, entropy = self.policy.get_backprop_data(
+                        mb_states, mb_actions
+                    )
+                    new_log_probs = new_log_probs.view_as(mb_log_probs)
 
-                        ratio = torch.exp(log_probs - old_probs)
-                        clipped = torch.clamp(
-                            ratio, 1.0 - self.clip_range, 1.0 + self.clip_range
-                        )
+                    ratio = torch.exp(new_log_probs - mb_log_probs)
+                    clipped = torch.clamp(
+                        ratio, 1.0 - self.clip_range, 1.0 + self.clip_range
+                    )
 
-                        with torch.no_grad():
-                            log_ratio = log_probs - old_probs
-                            kl = (torch.exp(log_ratio) - 1) - log_ratio
-                            kl = kl.mean().item()
-                            clip_fraction = torch.mean(
-                                (torch.abs(ratio - 1) > self.clip_range).float()
-                            ).item()
+                    with torch.no_grad():
+                        log_ratio = new_log_probs - mb_log_probs
+                        kl = (torch.exp(log_ratio) - 1) - log_ratio
+                        kl = kl.mean().item()
+                        clip_fraction = torch.mean(
+                            (torch.abs(ratio - 1) > self.clip_range).float()
+                        ).item()
 
-                        policy_loss = -torch.min(
-                            ratio * advantages, clipped * advantages
-                        ).mean()
-                        value_loss = self.value_loss_fn(vals, target_values)
-                        ppo_loss = (
-                            (policy_loss - entropy * self.ent_coef)
-                            * self.mini_batch_size
-                            / self.batch_size
-                        )
+                    policy_loss = -torch.min(
+                        ratio * mb_advantages, clipped * mb_advantages
+                    )
+                    policy_loss = (policy_loss * mb_weights).mean()
+                    value_loss = self.value_loss_fn(new_values, mb_values)
+                    value_loss = (value_loss * mb_weights).mean()
+                    ppo_loss = (
+                        (policy_loss - entropy * self.ent_coef)
+                        * self.mini_batch_size
+                        / self.batch_size
+                    )
 
-                    self.scaler.scale(ppo_loss).backward()
-                    self.scaler.scale(value_loss).backward()
+                self.scaler.scale(ppo_loss).backward()
+                self.scaler.scale(value_loss).backward()
 
-                    mean_val_loss += value_loss.item()
-                    mean_divergence += kl
-                    mean_entropy += entropy.item()
-                    clip_fractions.append(clip_fraction)
-                    n_minibatch_iterations += 1
+                mean_val_loss += value_loss.item()
+                mean_divergence += kl
+                mean_entropy += entropy.item()
+                clip_fractions.append(clip_fraction)
+                n_minibatch_iterations += 1
 
-                self.scaler.unscale_(self.policy_optimizer)
-                self.scaler.unscale_(self.value_optimizer)
-                torch.nn.utils.clip_grad_norm_(self.policy.parameters(), max_norm=0.5)
-                torch.nn.utils.clip_grad_norm_(
-                    self.value_net.parameters(), max_norm=0.5
-                )
+            self.scaler.unscale_(self.policy_optimizer)
+            self.scaler.unscale_(self.value_optimizer)
+            torch.nn.utils.clip_grad_norm_(self.policy.parameters(), max_norm=0.5)
+            torch.nn.utils.clip_grad_norm_(self.value_net.parameters(), max_norm=0.5)
 
-                self.scaler.step(self.policy_optimizer)
-                self.scaler.step(self.value_optimizer)
-                self.scaler.update()
+            self.scaler.step(self.policy_optimizer)
+            self.scaler.step(self.value_optimizer)
+            self.scaler.update()
 
-                self.policy_scheduler.step()
-                self.value_scheduler.step()
+            self.policy_scheduler.step()
+            self.value_scheduler.step()
 
-                n_iterations += 1
+            n_iterations += 1
 
         if n_iterations == 0:
             n_iterations = 1
@@ -280,9 +275,28 @@ class PPOLearner(object):
         self.value_optimizer.load_state_dict(
             torch.load(os.path.join(folder_path, "PPO_VALUE_NET_OPTIMIZER.pt"))
         )
-        self.policy_scheduler.load_state_dict(
-            torch.load(os.path.join(folder_path, "PPO_POLICY_SCHEDULER.pt"))
+
+        # Load scheduler states
+        policy_scheduler_state = torch.load(
+            os.path.join(folder_path, "PPO_POLICY_SCHEDULER.pt")
         )
-        self.value_scheduler.load_state_dict(
-            torch.load(os.path.join(folder_path, "PPO_VALUE_SCHEDULER.pt"))
+        value_scheduler_state = torch.load(
+            os.path.join(folder_path, "PPO_VALUE_SCHEDULER.pt")
+        )
+
+        self.policy_scheduler.load_state_dict(policy_scheduler_state)
+        self.value_scheduler.load_state_dict(value_scheduler_state)
+
+        # Set the learning rates to the last used learning rates
+        last_policy_lr = self.policy_scheduler.get_last_lr()[0]
+        last_value_lr = self.value_scheduler.get_last_lr()[0]
+
+        for param_group in self.policy_optimizer.param_groups:
+            param_group["lr"] = last_policy_lr
+
+        for param_group in self.value_optimizer.param_groups:
+            param_group["lr"] = last_value_lr
+
+        print(
+            f"Loaded checkpoint. Set policy LR to {last_policy_lr} and value LR to {last_value_lr}"
         )
