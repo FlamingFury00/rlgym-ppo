@@ -13,7 +13,7 @@ import os
 import random
 import shutil
 import time
-from typing import Union, Tuple
+from typing import Tuple, Union
 
 import numpy as np
 import torch
@@ -22,12 +22,12 @@ from wandb.wandb_run import Run
 
 from rlgym_ppo.batched_agents import BatchedAgentManager
 from rlgym_ppo.ppo import ExperienceBuffer, PPOLearner
-from rlgym_ppo.util import WelfordRunningStat, reporting, torch_functions, KBHit
+from rlgym_ppo.util import KBHit, WelfordRunningStat, reporting, torch_functions
 
 
 class Learner(object):
     def __init__(
-            # fmt: off
+        # fmt: off
             self,
             env_create_function,
             metrics_logger=None,
@@ -68,17 +68,18 @@ class Learner(object):
 
             checkpoints_save_folder: Union[str, None] = None,
             add_unix_timestamp: bool = True,
-            checkpoint_load_folder: Union[str, None] = None,
+            checkpoint_load_folder: Union[str, None] = "latest", # "latest" loads latest checkpoint
             save_every_ts: int = 1_000_000,
 
             instance_launch_delay: Union[float, None] = None,
             random_seed: int = 123,
             n_checkpoints_to_keep: int = 5,
             shm_buffer_size: int = 8192,
-            device: str = "auto"):
+            device: str = "auto"
+    ):
 
         assert (
-                env_create_function is not None
+            env_create_function is not None
         ), "MUST PROVIDE A FUNCTION TO CREATE RLGYM FUNCTIONS TO INITIALIZE RLGYM-PPO"
 
         if checkpoints_save_folder is None:
@@ -88,6 +89,7 @@ class Learner(object):
 
         # Add the option for the user to turn off the addition of Unix Timestamps to
         # the ``checkpoints_save_folder`` path
+        self.add_unix_timestamp = add_unix_timestamp
         if add_unix_timestamp:
             checkpoints_save_folder = f"{checkpoints_save_folder}-{time.time_ns()}"
 
@@ -125,12 +127,15 @@ class Learner(object):
         )
 
         print("Initializing processes...")
-        collect_metrics_fn = None if metrics_logger is None else self.metrics_logger.collect_metrics
+        collect_metrics_fn = (
+            None if metrics_logger is None else self.metrics_logger.collect_metrics
+        )
         self.agent = BatchedAgentManager(
-            None, min_inference_size=min_inference_size,
+            None,
+            min_inference_size=min_inference_size,
             seed=random_seed,
             standardize_obs=standardize_obs,
-            steps_per_obs_stats_increment=steps_per_obs_stats_increment
+            steps_per_obs_stats_increment=steps_per_obs_stats_increment,
         )
         obs_space_size, act_space_size, action_space_type = self.agent.init_processes(
             n_processes=n_proc,
@@ -139,7 +144,7 @@ class Learner(object):
             spawn_delay=instance_launch_delay,
             render=render,
             render_delay=render_delay,
-            shm_buffer_size=shm_buffer_size
+            shm_buffer_size=shm_buffer_size,
         )
         obs_space_size = np.prod(obs_space_size)
         print("Initializing PPO...")
@@ -188,7 +193,9 @@ class Learner(object):
         }
 
         self.wandb_run = wandb_run
-        wandb_loaded = checkpoint_load_folder is not None and self.load(checkpoint_load_folder, load_wandb, policy_lr, critic_lr)
+        wandb_loaded = checkpoint_load_folder is not None and self.load(
+            checkpoint_load_folder, load_wandb, policy_lr, critic_lr
+        )
 
         if log_to_wandb and self.wandb_run is None and not wandb_loaded:
             project = "rlgym-ppo" if wandb_project_name is None else wandb_project_name
@@ -196,7 +203,11 @@ class Learner(object):
             run_name = "rlgym-ppo-run" if wandb_run_name is None else wandb_run_name
             print("Attempting to create new wandb run...")
             self.wandb_run = wandb.init(
-                project=project, group=group, config=self.config, name=run_name, reinit=True
+                project=project,
+                group=group,
+                config=self.config,
+                name=run_name,
+                reinit=True,
             )
             print("Created new wandb run!", self.wandb_run.id)
         print("Learner successfully initialized!")
@@ -205,13 +216,13 @@ class Learner(object):
         if new_policy_lr is not None:
             self.policy_lr = new_policy_lr
             for param_group in self.ppo_learner.policy_optimizer.param_groups:
-                param_group['lr'] = new_policy_lr
+                param_group["lr"] = new_policy_lr
             print(f"New policy learning rate: {new_policy_lr}")
 
         if new_critic_lr is not None:
             self.critic_lr = new_critic_lr
             for param_group in self.ppo_learner.value_optimizer.param_groups:
-                param_group['lr'] = new_critic_lr
+                param_group["lr"] = new_critic_lr
             print(f"New policy learning rate: {new_policy_lr}")
 
     def learn(self):
@@ -230,7 +241,7 @@ class Learner(object):
 
             try:
                 self.save(self.agent.cumulative_timesteps)
-            except:
+            except Exception:
                 print("FAILED TO SAVE ON EXIT")
 
         finally:
@@ -244,7 +255,9 @@ class Learner(object):
 
         # Class to watch for keyboard hits
         kb = KBHit()
-        print("Press (p) to pause (c) to checkpoint, (q) to checkpoint and quit (after next iteration)\n")
+        print(
+            "Press (p) to pause (c) to checkpoint, (q) to checkpoint and quit (after next iteration)\n"
+        )
 
         # While the number of timesteps we have collected so far is less than the
         # amount we are allowed to collect.
@@ -253,12 +266,14 @@ class Learner(object):
             report = {}
 
             # Collect the desired number of timesteps from our agent.
-            experience, collected_metrics, steps_collected, collection_time = self.agent.collect_timesteps(
-                self.ts_per_epoch
+            experience, collected_metrics, steps_collected, collection_time = (
+                self.agent.collect_timesteps(self.ts_per_epoch)
             )
 
             if self.metrics_logger is not None:
-                self.metrics_logger.report_metrics(collected_metrics, self.wandb_run, self.agent.cumulative_timesteps)
+                self.metrics_logger.report_metrics(
+                    collected_metrics, self.wandb_run, self.agent.cumulative_timesteps
+                )
 
             # Add the new experience to our buffer and compute the various
             # reinforcement learning quantities we need to
@@ -290,9 +305,9 @@ class Learner(object):
                 report["Policy Reward"] = np.nan
 
             # Log to wandb and print to the console.
-            reporting.report_metrics(loggable_metrics=report,
-                                     debug_metrics=None,
-                                     wandb_run=self.wandb_run)
+            reporting.report_metrics(
+                loggable_metrics=report, debug_metrics=None, wandb_run=self.wandb_run
+            )
 
             report.clear()
             ppo_report.clear()
@@ -307,16 +322,16 @@ class Learner(object):
 
             if kb.kbhit():
                 c = kb.getch()
-                if c == 'p':  # pause
+                if c == "p":  # pause
                     print("Paused, press any key to resume")
                     while True:
                         if kb.kbhit():
                             break
-                if c in ('c', 'q'):
+                if c in ("c", "q"):
                     self.save(self.agent.cumulative_timesteps)
-                if c == 'q':
+                if c == "q":
                     return
-                if c in ('c', 'p'):
+                if c in ("c", "p"):
                     print("Resuming...\n")
 
             # Save if we've reached the next checkpoint timestep.
@@ -343,7 +358,7 @@ class Learner(object):
 
         # Construct input to the value function estimator that includes the final state
         # (which an action was not taken in)
-        val_inp = np.zeros(shape=(states.shape[0] + 1, states.shape[1]))
+        val_inp = np.zeros(shape=(states.shape[0] + 1, *states.shape[1:]))
         val_inp[:-1] = states
         val_inp[-1] = next_states[-1]
 
@@ -422,7 +437,6 @@ class Learner(object):
             "epoch": self.epoch,
             "ts_since_last_save": self.ts_since_last_save,
             "reward_running_stats": self.return_stats.to_json(),
-
         }
         if self.agent.standardize_obs:
             book_keeping_vars["obs_running_stats"] = self.agent.obs_stats.to_json()
@@ -452,6 +466,69 @@ class Learner(object):
         :return: None
         """
 
+        if folder_path == "latest":
+            save_folder = self.checkpoints_save_folder
+            if save_folder is None:
+                # No save folder to load from
+                return
+
+            if self.add_unix_timestamp:
+                # Save folder without the unix timestamp
+                base_save_folder = save_folder[: save_folder.rfind("-")]
+                save_path = os.path.dirname(base_save_folder)
+
+                if not os.path.exists(save_path):
+                    # Save path does not exist
+                    return
+
+                # Find folder with our base save path with the highest timestamp
+                highest_timestamp = -1
+                best_folder = None
+                for filename in os.listdir(save_path):
+                    full_path = os.path.join(save_path, filename)
+                    if not os.path.isdir(full_path):
+                        continue
+
+                    if full_path.startswith(base_save_folder):
+                        unix_start_idx = full_path.rfind("-") + 1
+                        if unix_start_idx > 0:
+                            unix_time_str = filename[unix_start_idx:]
+                            if unix_time_str.isdigit():
+                                timestamp = int(unix_time_str)
+                                if timestamp > highest_timestamp:
+                                    highest_timestamp = timestamp
+                                    best_folder = full_path
+
+                if best_folder is not None:
+                    load_base_path = best_folder
+                else:
+                    # Failed to find any unix timestamp folders under the right name
+                    return
+            else:
+                if os.path.exists(self.checkpoints_save_folder):
+                    load_base_path = self.checkpoints_save_folder
+                else:
+                    # Save path doesnt exist
+                    return
+
+            # Find folder with the highest timesteps to load
+            highest_ts = -1
+            for filename in os.listdir(load_base_path):
+                if not os.path.isdir(os.path.join(load_base_path, filename)):
+                    continue
+
+                if not filename.isdigit():
+                    continue
+
+                highest_ts = max(highest_ts, int(filename))
+
+            if highest_ts != -1:
+                folder_path = os.path.join(load_base_path, str(highest_ts))
+                print(f"Auto-load path: {folder_path}")
+            else:
+                # No timestep folders found to load
+                return
+
         # Make sure the folder exists.
         assert os.path.exists(folder_path), f"UNABLE TO LOCATE FOLDER {folder_path}"
         print(f"Loading from checkpoint at {folder_path}")
@@ -469,14 +546,20 @@ class Learner(object):
             ]
             self.return_stats.from_json(book_keeping_vars["reward_running_stats"])
 
-            if self.agent.standardize_obs and "obs_running_stats" in book_keeping_vars.keys():
+            if (
+                self.agent.standardize_obs
+                and "obs_running_stats" in book_keeping_vars.keys()
+            ):
                 self.agent.obs_stats = WelfordRunningStat(1)
                 self.agent.obs_stats.from_json(book_keeping_vars["obs_running_stats"])
-            if self.standardize_returns and "reward_running_stats" in book_keeping_vars.keys():
+            if (
+                self.standardize_returns
+                and "reward_running_stats" in book_keeping_vars.keys()
+            ):
                 self.return_stats.from_json(book_keeping_vars["reward_running_stats"])
 
             self.epoch = book_keeping_vars["epoch"]
-            
+
             # Update learning rates if new values are provided
             if new_policy_lr is not None or new_critic_lr is not None:
                 self.update_learning_rate(new_policy_lr, new_critic_lr)
@@ -507,6 +590,6 @@ class Learner(object):
 
         if self.wandb_run is not None:
             self.wandb_run.finish()
-        if type(self.agent) == BatchedAgentManager:
+        if self.agent is BatchedAgentManager:
             self.agent.cleanup()
         self.experience_buffer.clear()
