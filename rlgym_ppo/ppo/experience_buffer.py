@@ -35,28 +35,20 @@ class ExperienceBuffer(object):
         del t2
         return t
 
-    def __init__(self, max_size, seed, device, alpha=0.6, beta=0.4):
+    def __init__(self, max_size, seed, device):
         self.device = device
         self.seed = seed
+        self.states = torch.FloatTensor().to(self.device)
+        self.actions = torch.FloatTensor().to(self.device)
+        self.log_probs = torch.FloatTensor().to(self.device)
+        self.rewards = torch.FloatTensor().to(self.device)
+        self.next_states = torch.FloatTensor().to(self.device)
+        self.dones = torch.FloatTensor().to(self.device)
+        self.truncated = torch.FloatTensor().to(self.device)
+        self.values = torch.FloatTensor().to(self.device)
+        self.advantages = torch.FloatTensor().to(self.device)
         self.max_size = max_size
         self.rng = np.random.RandomState(seed)
-        self.alpha = alpha
-        self.beta = beta
-
-        # Initialize empty tensors
-        self.states = torch.empty((0,), dtype=torch.float32, device=self.device)
-        self.actions = torch.empty((0,), dtype=torch.float32, device=self.device)
-        self.log_probs = torch.empty((0,), dtype=torch.float32, device=self.device)
-        self.rewards = torch.empty((0,), dtype=torch.float32, device=self.device)
-        self.next_states = torch.empty((0,), dtype=torch.float32, device=self.device)
-        self.dones = torch.empty((0,), dtype=torch.float32, device=self.device)
-        self.truncated = torch.empty((0,), dtype=torch.float32, device=self.device)
-        self.values = torch.empty((0,), dtype=torch.float32, device=self.device)
-        self.advantages = torch.empty((0,), dtype=torch.float32, device=self.device)
-
-        # Prioritized Experience Replay (PER)
-        self.priorities = np.zeros((max_size,), dtype=np.float32)
-        self.current_size = 0
 
     def submit_experience(
         self,
@@ -133,22 +125,6 @@ class ExperienceBuffer(object):
             self.max_size,
         )
 
-        # Update priorities
-        new_priorities = (
-            np.abs(advantages.cpu().numpy()) + 1e-6
-        )  # Small epsilon to avoid zero priorities
-        if self.current_size + len(new_priorities) > self.max_size:
-            # If the new experiences exceed the buffer size, roll the priorities array
-            self.priorities = np.roll(self.priorities, -len(new_priorities))
-            self.priorities[-len(new_priorities) :] = new_priorities
-        else:
-            # Otherwise, append the new priorities to the existing ones
-            self.priorities[
-                self.current_size : self.current_size + len(new_priorities)
-            ] = new_priorities
-
-        self.current_size = min(self.current_size + len(new_priorities), self.max_size)
-
     def _get_samples(self, indices):
         return (
             self.actions[indices],
@@ -160,32 +136,17 @@ class ExperienceBuffer(object):
 
     def get_all_batches_shuffled(self, batch_size):
         """
-        Function to return the experience buffer in shuffled batches. Code taken from the stable-baselines3 buffer:
+        Function to return the experience buffer in shuffled batches. Code taken from the stable-baeselines3 buffer:
         https://github.com/DLR-RM/stable-baselines3/blob/2ddf015cd9840a2a1675f5208be6eb2e86e4d045/stable_baselines3/common/buffers.py#L482
         :param batch_size: size of each batch yielded by the generator.
         :return:
         """
 
-        total_samples = self.current_size
-        if total_samples == 0:
-            return
-
-        # Compute probabilities and importance sampling weights
-        probs = self.priorities[:total_samples] ** self.alpha
-        probs /= probs.sum()
-        indices = self.rng.choice(total_samples, size=total_samples, p=probs)
-        weights = (total_samples * probs[indices]) ** -self.beta
-        weights /= weights.max()
-
+        total_samples = self.rewards.shape[0]
+        indices = self.rng.permutation(total_samples)
         start_idx = 0
         while start_idx + batch_size <= total_samples:
-            batch_indices = indices[start_idx : start_idx + batch_size]
-            batch_weights = torch.as_tensor(
-                weights[start_idx : start_idx + batch_size],
-                dtype=torch.float32,
-                device=self.device,
-            )
-            yield self._get_samples(batch_indices), batch_weights
+            yield self._get_samples(indices[start_idx : start_idx + batch_size])
             start_idx += batch_size
 
     def clear(self):

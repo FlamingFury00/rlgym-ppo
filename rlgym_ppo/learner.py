@@ -44,8 +44,7 @@ class Learner(object):
             max_returns_per_stats_increment: int = 150,
             steps_per_obs_stats_increment: int = 5,
 
-            policy_layer_sizes: Tuple[int, ...] = (256, 256, 256),
-            critic_layer_sizes: Tuple[int, ...] = (256, 256, 256),
+            layer_sizes: Tuple[int, ...] = (256, 256, 256),
             continuous_var_range: Tuple[float, ...] = (0.1, 1.0),
 
             ppo_epochs: int = 10,
@@ -56,8 +55,7 @@ class Learner(object):
 
             gae_lambda: float = 0.95,
             gae_gamma: float = 0.99,
-            policy_lr: float = 3e-4,
-            critic_lr: float = 3e-4,
+            learning_rate: float = 3e-4,
 
             log_to_wandb: bool = False,
             load_wandb: bool = True,
@@ -160,15 +158,14 @@ class Learner(object):
             n_epochs=ppo_epochs,
             continuous_var_range=continuous_var_range,
             policy_type=action_space_type,
-            policy_layer_sizes=policy_layer_sizes,
-            critic_layer_sizes=critic_layer_sizes,
-            policy_lr=policy_lr,
-            critic_lr=critic_lr,
+            layer_sizes=layer_sizes,
+            learning_rate=learning_rate,
             clip_range=ppo_clip_range,
             ent_coef=ppo_ent_coef,
         )
 
-        self.agent.policy = self.ppo_learner.policy
+        self.agent.policy = self.ppo_learner.shared_network
+        self.learning_rate = learning_rate
 
         self.config = {
             "n_proc": n_proc,
@@ -178,8 +175,7 @@ class Learner(object):
             "ts_per_iteration": ts_per_iteration,
             "standardize_returns": standardize_returns,
             "standardize_obs": standardize_obs,
-            "policy_layer_sizes": policy_layer_sizes,
-            "critic_layer_sizes": critic_layer_sizes,
+            "layer_sizes": layer_sizes,
             "ppo_epochs": ppo_epochs,
             "ppo_batch_size": ppo_batch_size,
             "ppo_minibatch_size": ppo_minibatch_size,
@@ -187,14 +183,13 @@ class Learner(object):
             "ppo_clip_range": ppo_clip_range,
             "gae_lambda": gae_lambda,
             "gae_gamma": gae_gamma,
-            "policy_lr": policy_lr,
-            "critic_lr": critic_lr,
+            "learning_rate": learning_rate,
             "shm_buffer_size": shm_buffer_size,
         }
 
         self.wandb_run = wandb_run
         wandb_loaded = checkpoint_load_folder is not None and self.load(
-            checkpoint_load_folder, load_wandb, policy_lr, critic_lr
+            checkpoint_load_folder, load_wandb
         )
 
         if log_to_wandb and self.wandb_run is None and not wandb_loaded:
@@ -345,8 +340,7 @@ class Learner(object):
     def add_new_experience(self, experience):
         """
         Function to add timesteps to our experience buffer and compute the advantage
-        function estimates, value function
-        estimates, and returns.
+        function estimates, value function estimates, and returns.
         :param experience: tuple containing
         (experience, steps_collected, collection_time) from an agent.
         :return: None
@@ -354,7 +348,7 @@ class Learner(object):
 
         # Unpack timestep data.
         states, actions, log_probs, rewards, next_states, dones, truncated = experience
-        value_net = self.ppo_learner.value_net
+        shared_network = self.ppo_learner.shared_network
 
         # Construct input to the value function estimator that includes the final state
         # (which an action was not taken in)
@@ -362,8 +356,9 @@ class Learner(object):
         val_inp[:-1] = states
         val_inp[-1] = next_states[-1]
 
-        # Predict the expected returns at each state.
-        val_preds = value_net(val_inp).cpu().flatten().tolist()
+        # Get value estimates from the shared network
+        _, val_preds_tensor = shared_network.get_output(val_inp)
+        val_preds = val_preds_tensor.cpu().flatten().tolist()
         torch.cuda.empty_cache()
 
         # Compute the desired reinforcement learning quantities.
@@ -382,7 +377,6 @@ class Learner(object):
         if self.standardize_returns:
             # Update the running statistics about the returns.
             n_to_increment = min(self.max_returns_per_stats_increment, len(returns))
-
             self.return_stats.increment(returns[:n_to_increment], n_to_increment)
 
         # Add our new experience to the buffer.
@@ -560,9 +554,8 @@ class Learner(object):
 
             self.epoch = book_keeping_vars["epoch"]
 
-            # Update learning rates if new values are provided
-            if new_policy_lr is not None or new_critic_lr is not None:
-                self.update_learning_rate(new_policy_lr, new_critic_lr)
+            # Update learning rates
+            self.update_learning_rate(self.learning_rate, self.learning_rate)
 
             # check here for backwards compatibility
 
@@ -590,6 +583,6 @@ class Learner(object):
 
         if self.wandb_run is not None:
             self.wandb_run.finish()
-        if self.agent is BatchedAgentManager:
+        if type(self.agent) is BatchedAgentManager:
             self.agent.cleanup()
         self.experience_buffer.clear()
