@@ -1,62 +1,93 @@
-"""
-File: experience_buffer.py
-Author: Matthew Allen
-
-Description:
-    A buffer containing the experience to be learned from on this iteration. The buffer may be added to, removed from,
-    and shuffled. When the maximum specified size of the buffer is exceeded, the least recent entries will be removed in
-    a FIFO fashion.
-"""
-
 import numpy as np
 import torch
 
 
-class ExperienceBuffer(object):
-    @staticmethod
-    def _cat(t1, t2, size):
-        if len(t2) > size:
-            # t2 alone is larger than we want; copy the end
-            t = t2[-size:].clone()
+class SumTree:
+    def __init__(self, capacity):
+        self.capacity = capacity
+        self.tree = np.zeros(2 * capacity - 1)
+        self.data = np.zeros(capacity, dtype=object)
+        self.write = 0
+        self.n_entries = 0
 
-        elif len(t2) == size:
-            # t2 is a perfect match; just use it directly
-            t = t2
+    def _propagate(self, idx, change):
+        """Update the sum tree iteratively from a leaf node to the root."""
+        while idx != 0:  # Continue until we reach the root
+            parent = (idx - 1) // 2
+            self.tree[parent] += change
+            idx = parent
 
-        elif len(t1) + len(t2) > size:
-            # t1+t2 is larger than we want; use t2 wholly with the end of t1 before it
-            t = torch.cat((t1[len(t2) - size :], t2), 0)
+    def _retrieve(self, idx, s):
+        left = 2 * idx + 1
+        right = left + 1
 
+        if left >= len(self.tree):
+            return idx
+
+        if s <= self.tree[left]:
+            return self._retrieve(left, s)
         else:
-            # t1+t2 does not exceed what we want; concatenate directly
-            t = torch.cat((t1, t2), 0)
+            return self._retrieve(right, s - self.tree[left])
 
-        del t1
-        del t2
-        return t
+    def total(self):
+        return self.tree[0]
 
-    def __init__(self, max_size, seed, device, alpha=0.6, beta=0.4):
+    def add(self, p, data):
+        idx = self.write + self.capacity - 1
+        self.data[self.write] = data
+        self.update(idx, p)
+        self.write = (self.write + 1) % self.capacity
+        self.n_entries = min(self.n_entries + 1, self.capacity)
+
+    def update(self, idx, p):
+        change = p - self.tree[idx]
+        self.tree[idx] = p
+        self._propagate(idx, change)
+
+    def get(self, s):
+        idx = self._retrieve(0, s)
+        dataIdx = idx - self.capacity + 1
+        return (idx, self.tree[idx], self.data[dataIdx])
+
+
+class ExperienceBuffer(object):
+    def __init__(
+        self, max_size, seed, device, alpha=0.6, beta=0.4, beta_increment=0.001
+    ):
         self.device = device
         self.seed = seed
         self.max_size = max_size
+        self.tree = SumTree(max_size)
+        self.alpha = alpha  # How much prioritization to use (0 = none, 1 = full)
+        self.beta = beta  # Importance sampling correction
+        self.beta_increment = beta_increment
+        self.max_priority = 1.0
         self.rng = np.random.RandomState(seed)
-        self.alpha = alpha
-        self.beta = beta
 
-        # Initialize empty tensors
-        self.states = torch.empty((0,), dtype=torch.float32, device=self.device)
-        self.actions = torch.empty((0,), dtype=torch.float32, device=self.device)
-        self.log_probs = torch.empty((0,), dtype=torch.float32, device=self.device)
-        self.rewards = torch.empty((0,), dtype=torch.float32, device=self.device)
-        self.next_states = torch.empty((0,), dtype=torch.float32, device=self.device)
-        self.dones = torch.empty((0,), dtype=torch.float32, device=self.device)
-        self.truncated = torch.empty((0,), dtype=torch.float32, device=self.device)
-        self.values = torch.empty((0,), dtype=torch.float32, device=self.device)
-        self.advantages = torch.empty((0,), dtype=torch.float32, device=self.device)
+        # Original tensors
+        self.states = torch.FloatTensor().to(self.device)
+        self.actions = torch.FloatTensor().to(self.device)
+        self.log_probs = torch.FloatTensor().to(self.device)
+        self.rewards = torch.FloatTensor().to(self.device)
+        self.next_states = torch.FloatTensor().to(self.device)
+        self.dones = torch.FloatTensor().to(self.device)
+        self.truncated = torch.FloatTensor().to(self.device)
+        self.values = torch.FloatTensor().to(self.device)
+        self.advantages = torch.FloatTensor().to(self.device)
 
-        # Prioritized Experience Replay (PER)
-        self.priorities = np.zeros((max_size,), dtype=np.float32)
-        self.current_size = 0
+    @staticmethod
+    def _cat(t1, t2, size):
+        if len(t2) > size:
+            t = t2[-size:].clone()
+        elif len(t2) == size:
+            t = t2
+        elif len(t1) + len(t2) > size:
+            t = torch.cat((t1[len(t2) - size :], t2), 0)
+        else:
+            t = torch.cat((t1, t2), 0)
+        del t1
+        del t2
+        return t
 
     def submit_experience(
         self,
@@ -70,23 +101,24 @@ class ExperienceBuffer(object):
         values,
         advantages,
     ):
-        """
-        Function to add experience to the buffer.
-
-        :param states: An ordered sequence of states from the environment.
-        :param actions: The corresponding actions that were taken at each state in the `states` sequence.
-        :param log_probs: The log probability for each action in `actions`
-        :param rewards: A list rewards for each pair in `states` and `actions`
-        :param next_states: An ordered sequence of next states (the states which occurred after an action) from the environment.
-        :param dones: An ordered sequence of the done (terminated) flag from the environment.
-        :param truncated: An ordered sequence of the truncated flag from the environment.
-        :param values: The output of the value function estimator evaluated on the concatenation of `states` and the final state in `next_states`
-        :param advantages: The advantage of each action at each state in `states` and `actions`
-
-        :return: None
-        """
-
         _cat = ExperienceBuffer._cat
+
+        # Store experience with max priority for new samples
+        for i in range(len(states)):
+            experience = (
+                states[i],
+                actions[i],
+                log_probs[i],
+                rewards[i],
+                next_states[i],
+                dones[i],
+                truncated[i],
+                values[i],
+                advantages[i],
+            )
+            self.tree.add(self.max_priority, experience)
+
+        # Update tensors as before
         self.states = _cat(
             self.states,
             torch.as_tensor(states, dtype=torch.float32, device=self.device),
@@ -133,21 +165,14 @@ class ExperienceBuffer(object):
             self.max_size,
         )
 
-        # Update priorities
-        new_priorities = (
-            np.abs(advantages.cpu().numpy()) + 1e-6
-        )  # Small epsilon to avoid zero priorities
-        if self.current_size + len(new_priorities) > self.max_size:
-            # If the new experiences exceed the buffer size, roll the priorities array
-            self.priorities = np.roll(self.priorities, -len(new_priorities))
-            self.priorities[-len(new_priorities) :] = new_priorities
-        else:
-            # Otherwise, append the new priorities to the existing ones
-            self.priorities[
-                self.current_size : self.current_size + len(new_priorities)
-            ] = new_priorities
+    def _get_priority(self, error):
+        return (np.abs(error) + 1e-5) ** self.alpha
 
-        self.current_size = min(self.current_size + len(new_priorities), self.max_size)
+    def update_priorities(self, indices, errors):
+        for idx, error in zip(indices, errors):
+            priority = self._get_priority(error)
+            self.tree.update(idx, priority)
+            self.max_priority = max(self.max_priority, priority)
 
     def _get_samples(self, indices):
         return (
@@ -159,40 +184,33 @@ class ExperienceBuffer(object):
         )
 
     def get_all_batches_shuffled(self, batch_size):
-        """
-        Function to return the experience buffer in shuffled batches. Code taken from the stable-baselines3 buffer:
-        https://github.com/DLR-RM/stable-baselines3/blob/2ddf015cd9840a2a1675f5208be6eb2e86e4d045/stable_baselines3/common/buffers.py#L482
-        :param batch_size: size of each batch yielded by the generator.
-        :return:
-        """
+        self.beta = min(1.0, self.beta + self.beta_increment)
 
-        total_samples = self.current_size
-        if total_samples == 0:
-            return
-
-        # Compute probabilities and importance sampling weights
-        probs = self.priorities[:total_samples] ** self.alpha
-        probs /= probs.sum()
-        indices = self.rng.choice(total_samples, size=total_samples, p=probs)
-        weights = (total_samples * probs[indices]) ** -self.beta
-        weights /= weights.max()
-
+        total_samples = self.rewards.shape[0]
+        indices = self.rng.permutation(total_samples)
         start_idx = 0
+
         while start_idx + batch_size <= total_samples:
             batch_indices = indices[start_idx : start_idx + batch_size]
-            batch_weights = torch.as_tensor(
-                weights[start_idx : start_idx + batch_size],
-                dtype=torch.float32,
-                device=self.device,
-            )
-            yield self._get_samples(batch_indices), batch_weights
+
+            # Calculate importance sampling weights
+            priorities = self.tree.tree[batch_indices + self.tree.capacity - 1]
+            probabilities = priorities / (
+                self.tree.total() + 1e-5
+            )  # Add small epsilon to avoid division by zero
+
+            # Add small epsilon to probabilities to avoid zero values
+            probabilities = np.maximum(probabilities, 1e-5)
+
+            weights = (probabilities * total_samples) ** (-self.beta)
+            weights = weights / (
+                weights.max() + 1e-5
+            )  # Add small epsilon to avoid division by zero
+
+            yield self._get_samples(batch_indices), weights, batch_indices
             start_idx += batch_size
 
     def clear(self):
-        """
-        Function to clear the experience buffer.
-        :return: None.
-        """
         del self.states
         del self.actions
         del self.log_probs
