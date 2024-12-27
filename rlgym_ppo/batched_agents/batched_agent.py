@@ -1,4 +1,6 @@
-def batched_agent_process(proc_id, endpoint, shm_buffer, shm_offset, shm_size, seed, render, render_delay):
+def batched_agent_process(
+    proc_id, endpoint, shm_buffer, shm_offset, shm_size, seed, render, render_delay
+):
     """
     Function to interact with an environment and communicate with the learner through a pipe.
 
@@ -26,6 +28,7 @@ def batched_agent_process(proc_id, endpoint, shm_buffer, shm_offset, shm_size, s
         try:
             from rlviser_py import get_game_paused, get_game_speed
         except ImportError:
+
             def get_game_speed() -> float:
                 return 1.0
 
@@ -70,7 +73,7 @@ def batched_agent_process(proc_id, endpoint, shm_buffer, shm_offset, shm_size, s
     env.action_space.seed(seed)
     reset_state = env.reset()
 
-    if type(reset_state) != np.ndarray:
+    if type(reset_state) is not np.ndarray:
         reset_state = np.asarray(reset_state, dtype=np.float32)
     elif reset_state.dtype != np.float32:
         reset_state = reset_state.astype(np.float32)
@@ -134,7 +137,7 @@ def batched_agent_process(proc_id, endpoint, shm_buffer, shm_offset, shm_size, s
 
                     action_buffer = np.zeros((int(n_agents), action_buffer.shape[-1]))
 
-                if type(obs) != np.ndarray:
+                if type(obs) is not np.ndarray:
                     obs = np.asarray(obs, dtype=np.float32)
                 elif obs.dtype != np.float32:
                     obs = obs.astype(np.float32)
@@ -151,11 +154,35 @@ def batched_agent_process(proc_id, endpoint, shm_buffer, shm_offset, shm_size, s
 
                 if shm_view is None or shm_shapes != (prev_n_agents, n_agents):
                     shm_shapes = (prev_n_agents, n_agents)
-                    count = 5 + len(metrics_shape) + len(state_shape) + len(rew) + metrics.size + obs.size
-                    assert(count <= shm_size), "ATTEMPTED TO CREATE AGENT MESSAGE BUFFER LARGER THAN MAXIMUM ALLOWED SIZE"
-                    shm_view = np.frombuffer(buffer=shm_buffer, dtype=np.float32, offset=shm_offset, count=count)
+                    count = (
+                        5
+                        + len(metrics_shape)
+                        + len(state_shape)
+                        + len(rew)
+                        + metrics.size
+                        + obs.size
+                    )
+                    assert (
+                        count <= shm_size
+                    ), "ATTEMPTED TO CREATE AGENT MESSAGE BUFFER LARGER THAN MAXIMUM ALLOWED SIZE"
+                    shm_view = np.frombuffer(
+                        buffer=shm_buffer,
+                        dtype=np.float32,
+                        offset=shm_offset,
+                        count=count,
+                    )
 
-                offset = _append_array(shm_view, 0, [prev_n_agents, done, truncated, n_elements_in_state_shape, len(metrics_shape)])
+                offset = _append_array(
+                    shm_view,
+                    0,
+                    [
+                        prev_n_agents,
+                        done,
+                        truncated,
+                        n_elements_in_state_shape,
+                        len(metrics_shape),
+                    ],
+                )
                 offset = _append_array(shm_view, offset, metrics_shape)
                 offset = _append_array(shm_view, offset, state_shape)
                 offset = _append_array(shm_view, offset, rew)
@@ -190,9 +217,9 @@ def batched_agent_process(proc_id, endpoint, shm_buffer, shm_offset, shm_size, s
 
                 # Print out the environment shapes and action space type.
                 print("Received request for env shapes, returning:")
-                print(F"- Observations shape: {env.observation_space.shape}")
-                print(F"- Number of actions: {n_acts}")
-                print(F"- Action space type: {action_space_type} ({action_type})")
+                print(f"- Observations shape: {env.observation_space.shape}")
+                print(f"- Number of actions: {n_acts}")
+                print(f"- Action space type: {action_space_type} ({action_type})")
                 print("--------------------")
 
                 env_shape = float(np.prod(env.observation_space.shape))

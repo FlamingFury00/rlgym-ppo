@@ -3,7 +3,7 @@ File: learner.py
 Author: Matthew Allen
 
 Description:
-The primary algorithm file. The Learner object coordinates timesteps from the workers 
+The primary algorithm file. The Learner object coordinates timesteps from the workers
 and sends them to PPO, keeps track of the misc. variables and statistics for logging,
 reports to wandb and the console, and handles checkpointing.
 """
@@ -13,21 +13,21 @@ import os
 import random
 import shutil
 import time
-from typing import Union, Tuple
+from typing import Tuple, Union
 
 import numpy as np
 import torch
 import wandb
-from wandb.wandb_run import Run
+from wandb.sdk.wandb_run import Run  # Corrected import
 
 from rlgym_ppo.batched_agents import BatchedAgentManager
 from rlgym_ppo.ppo import ExperienceBuffer, PPOLearner
-from rlgym_ppo.util import WelfordRunningStat, reporting, torch_functions, KBHit
+from rlgym_ppo.util import KBHit, WelfordRunningStat, reporting, torch_functions
 
 
 class Learner(object):
     def __init__(
-            # fmt: off
+        # fmt: off
             self,
             env_create_function,
             metrics_logger=None,
@@ -68,17 +68,18 @@ class Learner(object):
 
             checkpoints_save_folder: Union[str, None] = None,
             add_unix_timestamp: bool = True,
-            checkpoint_load_folder: Union[str, None] = None,
+            checkpoint_load_folder: Union[str, None] = None, # "latest" loads latest checkpoint
             save_every_ts: int = 1_000_000,
 
             instance_launch_delay: Union[float, None] = None,
             random_seed: int = 123,
             n_checkpoints_to_keep: int = 5,
             shm_buffer_size: int = 8192,
-            device: str = "auto"):
+            device: str = "auto"
+    ):
 
         assert (
-                env_create_function is not None
+            env_create_function is not None
         ), "MUST PROVIDE A FUNCTION TO CREATE RLGYM FUNCTIONS TO INITIALIZE RLGYM-PPO"
 
         if checkpoints_save_folder is None:
@@ -86,8 +87,7 @@ class Learner(object):
                 "data", "checkpoints", "rlgym-ppo-run"
             )
 
-        # Add the option for the user to turn off the addition of Unix Timestamps to
-        # the ``checkpoints_save_folder`` path
+        self.add_unix_timestamp = add_unix_timestamp
         if add_unix_timestamp:
             checkpoints_save_folder = f"{checkpoints_save_folder}-{time.time_ns()}"
 
@@ -105,6 +105,7 @@ class Learner(object):
 
         if device in {"auto", "gpu"} and torch.cuda.is_available():
             self.device = "cuda:0"
+            torch.cuda.set_device(self.device)  # Ensure the correct GPU is selected
             torch.backends.cudnn.benchmark = True
         elif device == "auto" and not torch.cuda.is_available():
             self.device = "cpu"
@@ -120,17 +121,21 @@ class Learner(object):
         self.return_stats = WelfordRunningStat(1)
         self.epoch = 0
 
+        # Initialize ExperienceBuffer directly on the target device if possible
         self.experience_buffer = ExperienceBuffer(
-            self.exp_buffer_size, seed=random_seed, device="cpu"
+            self.exp_buffer_size, seed=random_seed, device=self.device
         )
 
         print("Initializing processes...")
-        collect_metrics_fn = None if metrics_logger is None else self.metrics_logger.collect_metrics
+        collect_metrics_fn = (
+            None if metrics_logger is None else self.metrics_logger.collect_metrics
+        )
         self.agent = BatchedAgentManager(
-            None, min_inference_size=min_inference_size,
+            None,
+            min_inference_size=min_inference_size,
             seed=random_seed,
             standardize_obs=standardize_obs,
-            steps_per_obs_stats_increment=steps_per_obs_stats_increment
+            steps_per_obs_stats_increment=steps_per_obs_stats_increment,
         )
         obs_space_size, act_space_size, action_space_type = self.agent.init_processes(
             n_processes=n_proc,
@@ -139,7 +144,7 @@ class Learner(object):
             spawn_delay=instance_launch_delay,
             render=render,
             render_delay=render_delay,
-            shm_buffer_size=shm_buffer_size
+            shm_buffer_size=shm_buffer_size,
         )
         obs_space_size = np.prod(obs_space_size)
         print("Initializing PPO...")
@@ -188,7 +193,9 @@ class Learner(object):
         }
 
         self.wandb_run = wandb_run
-        wandb_loaded = checkpoint_load_folder is not None and self.load(checkpoint_load_folder, load_wandb, policy_lr, critic_lr)
+        wandb_loaded = checkpoint_load_folder is not None and self.load(
+            checkpoint_load_folder, load_wandb, policy_lr, critic_lr
+        )
 
         if log_to_wandb and self.wandb_run is None and not wandb_loaded:
             project = "rlgym-ppo" if wandb_project_name is None else wandb_project_name
@@ -196,23 +203,39 @@ class Learner(object):
             run_name = "rlgym-ppo-run" if wandb_run_name is None else wandb_run_name
             print("Attempting to create new wandb run...")
             self.wandb_run = wandb.init(
-                project=project, group=group, config=self.config, name=run_name, reinit=True
+                project=project,
+                group=group,
+                config=self.config,
+                name=run_name,
+                reinit=True,
+                allow_val_change=True,
             )
             print("Created new wandb run!", self.wandb_run.id)
         print("Learner successfully initialized!")
 
     def update_learning_rate(self, new_policy_lr=None, new_critic_lr=None):
-        if new_policy_lr is not None:
+        updated = False
+        if (
+            new_policy_lr is not None
+            and self.ppo_learner.policy_optimizer.param_groups[0]["lr"] != new_policy_lr
+        ):
             self.policy_lr = new_policy_lr
             for param_group in self.ppo_learner.policy_optimizer.param_groups:
-                param_group['lr'] = new_policy_lr
+                param_group["lr"] = new_policy_lr
             print(f"New policy learning rate: {new_policy_lr}")
+            updated = True
 
-        if new_critic_lr is not None:
+        if (
+            new_critic_lr is not None
+            and self.ppo_learner.value_optimizer.param_groups[0]["lr"] != new_critic_lr
+        ):
             self.critic_lr = new_critic_lr
             for param_group in self.ppo_learner.value_optimizer.param_groups:
-                param_group['lr'] = new_critic_lr
-            print(f"New policy learning rate: {new_policy_lr}")
+                param_group["lr"] = new_critic_lr
+            print(f"New critic learning rate: {new_critic_lr}")
+            updated = True
+
+        return updated
 
     def learn(self):
         """
@@ -230,7 +253,7 @@ class Learner(object):
 
             try:
                 self.save(self.agent.cumulative_timesteps)
-            except:
+            except Exception:
                 print("FAILED TO SAVE ON EXIT")
 
         finally:
@@ -242,57 +265,61 @@ class Learner(object):
         :return: None
         """
 
-        # Class to watch for keyboard hits
         kb = KBHit()
-        print("Press (p) to pause (c) to checkpoint, (q) to checkpoint and quit (after next iteration)\n")
+        print(
+            "Press (p) to pause (c) to checkpoint, (q) to checkpoint and quit (after next iteration)\n"
+        )
 
-        # While the number of timesteps we have collected so far is less than the
-        # amount we are allowed to collect.
         while self.agent.cumulative_timesteps < self.timestep_limit:
             epoch_start = time.perf_counter()
             report = {}
 
-            # Collect the desired number of timesteps from our agent.
-            experience, collected_metrics, steps_collected, collection_time = self.agent.collect_timesteps(
-                self.ts_per_epoch
+            # Collect timesteps and directly move the experience to the target device
+            experience, collected_metrics, steps_collected, collection_time = (
+                self.agent.collect_timesteps(self.ts_per_epoch)
             )
 
             if self.metrics_logger is not None:
-                self.metrics_logger.report_metrics(collected_metrics, self.wandb_run, self.agent.cumulative_timesteps)
+                self.metrics_logger.report_metrics(
+                    collected_metrics, self.wandb_run, self.agent.cumulative_timesteps
+                )
 
-            # Add the new experience to our buffer and compute the various
-            # reinforcement learning quantities we need to
-            # learn from (advantages, values, returns).
+            # Add new experience and compute RL quantities directly on the target device
+            add_exp_start_time = time.perf_counter()
             self.add_new_experience(experience)
+            add_exp_time = time.perf_counter() - add_exp_start_time
 
-            # Let PPO compute updates using our experience buffer.
+            # Learn from the experience buffer
+            ppo_start_time = time.perf_counter()
             ppo_report = self.ppo_learner.learn(self.experience_buffer)
+            ppo_time = time.perf_counter() - ppo_start_time
+
             epoch_stop = time.perf_counter()
             epoch_time = epoch_stop - epoch_start
 
-            # Report variables we care about.
             report.update(ppo_report)
-            if self.epoch < 1:
-                report["Value Function Loss"] = np.nan
-
             report["Cumulative Timesteps"] = self.agent.cumulative_timesteps
             report["Total Iteration Time"] = epoch_time
             report["Timesteps Collected"] = steps_collected
             report["Timestep Collection Time"] = collection_time
-            report["Timestep Consumption Time"] = epoch_time - collection_time
+            report["Experience Processing Time"] = add_exp_time
+            report["PPO Learning Time"] = ppo_time
+            report["Timestep Consumption Time"] = (
+                epoch_time - collection_time - add_exp_time
+            )  # Correct calculation
             report["Collected Steps per Second"] = steps_collected / collection_time
             report["Overall Steps per Second"] = steps_collected / epoch_time
 
             self.ts_since_last_save += steps_collected
-            if self.agent.average_reward is not None:
-                report["Policy Reward"] = self.agent.average_reward
-            else:
-                report["Policy Reward"] = np.nan
+            report["Policy Reward"] = (
+                self.agent.average_reward
+                if self.agent.average_reward is not None
+                else np.nan
+            )
 
-            # Log to wandb and print to the console.
-            reporting.report_metrics(loggable_metrics=report,
-                                     debug_metrics=None,
-                                     wandb_run=self.wandb_run)
+            reporting.report_metrics(
+                loggable_metrics=report, debug_metrics=None, wandb_run=self.wandb_run
+            )
 
             report.clear()
             ppo_report.clear()
@@ -300,26 +327,20 @@ class Learner(object):
             if "cuda" in self.device:
                 torch.cuda.empty_cache()
 
-            # Check if keyboard press
-            # p: pause, any key to resume
-            # c: checkpoint
-            # q: checkpoint and quit
-
             if kb.kbhit():
                 c = kb.getch()
-                if c == 'p':  # pause
+                if c == "p":
                     print("Paused, press any key to resume")
                     while True:
                         if kb.kbhit():
                             break
-                if c in ('c', 'q'):
+                if c in ("c", "q"):
                     self.save(self.agent.cumulative_timesteps)
-                if c == 'q':
+                if c == "q":
                     return
-                if c in ('c', 'p'):
+                if c in ("c", "p"):
                     print("Resuming...\n")
 
-            # Save if we've reached the next checkpoint timestep.
             if self.ts_since_last_save >= self.save_every_ts:
                 self.save(self.agent.cumulative_timesteps)
                 self.ts_since_last_save = 0
@@ -328,49 +349,58 @@ class Learner(object):
 
     @torch.no_grad()
     def add_new_experience(self, experience):
-        """
-        Function to add timesteps to our experience buffer and compute the advantage
-        function estimates, value function
-        estimates, and returns.
-        :param experience: tuple containing
-        (experience, steps_collected, collection_time) from an agent.
-        :return: None
-        """
-
-        # Unpack timestep data.
         states, actions, log_probs, rewards, next_states, dones, truncated = experience
         value_net = self.ppo_learner.value_net
 
-        # Construct input to the value function estimator that includes the final state
-        # (which an action was not taken in)
-        val_inp = np.zeros(shape=(states.shape[0] + 1, states.shape[1]))
-        val_inp[:-1] = states
-        val_inp[-1] = next_states[-1]
+        # Move data to the target device once here
+        states_tensor = torch.as_tensor(states, dtype=torch.float32, device=self.device)
+        next_states_tensor = torch.as_tensor(
+            next_states, dtype=torch.float32, device=self.device
+        )
+        rewards_tensor = torch.as_tensor(
+            rewards, dtype=torch.float32, device=self.device
+        )
+        dones_tensor = torch.as_tensor(dones, dtype=torch.float32, device=self.device)
+        truncated_tensor = torch.as_tensor(
+            truncated, dtype=torch.float32, device=self.device
+        )
 
-        # Predict the expected returns at each state.
-        val_preds = value_net(val_inp).cpu().flatten().tolist()
-        torch.cuda.empty_cache()
+        # Construct input for value function estimator
+        if next_states_tensor.numel() > 0:
+            val_inp = torch.cat(
+                (states_tensor, next_states_tensor[-1].unsqueeze(0)), dim=0
+            )
+        else:
+            val_inp = states_tensor  # Use only states if next_states is empty
 
-        # Compute the desired reinforcement learning quantities.
+        # Predict expected returns
+        val_preds = value_net(val_inp).flatten()
+
+        # Compute GAE
         ret_std = self.return_stats.std[0] if self.standardize_returns else None
-
         value_targets, advantages, returns = torch_functions.compute_gae(
-            rewards,
-            dones,
-            truncated,
-            val_preds,
+            rewards_tensor.cpu().numpy().tolist(),
+            dones_tensor.cpu().numpy().tolist(),
+            truncated_tensor.cpu().numpy().tolist(),
+            val_preds.cpu()
+            .numpy()
+            .tolist(),  # Compute GAE on CPU for now, can optimize later
             gamma=self.gae_gamma,
             lmbda=self.gae_lambda,
-            return_std=ret_std,  # 1 by default if no standardization is requested
+            return_std=ret_std,
+        )
+        value_targets = torch.as_tensor(
+            value_targets, dtype=torch.float32, device=self.device
+        )
+        advantages = torch.as_tensor(
+            advantages, dtype=torch.float32, device=self.device
         )
 
         if self.standardize_returns:
-            # Update the running statistics about the returns.
             n_to_increment = min(self.max_returns_per_stats_increment, len(returns))
-
             self.return_stats.increment(returns[:n_to_increment], n_to_increment)
 
-        # Add our new experience to the buffer.
+        # Submit experience to the buffer
         self.experience_buffer.submit_experience(
             states,
             actions,
@@ -379,8 +409,8 @@ class Learner(object):
             next_states,
             dones,
             truncated,
-            value_targets,
-            advantages,
+            value_targets.cpu().numpy(),  # Keep in numpy for buffer (optimized in prev step)
+            advantages.cpu().numpy(),
         )
 
     def save(self, cumulative_timesteps):
@@ -422,7 +452,6 @@ class Learner(object):
             "epoch": self.epoch,
             "ts_since_last_save": self.ts_since_last_save,
             "reward_running_stats": self.return_stats.to_json(),
-
         }
         if self.agent.standardize_obs:
             book_keeping_vars["obs_running_stats"] = self.agent.obs_stats.to_json()
@@ -469,14 +498,20 @@ class Learner(object):
             ]
             self.return_stats.from_json(book_keeping_vars["reward_running_stats"])
 
-            if self.agent.standardize_obs and "obs_running_stats" in book_keeping_vars.keys():
+            if (
+                self.agent.standardize_obs
+                and "obs_running_stats" in book_keeping_vars.keys()
+            ):
                 self.agent.obs_stats = WelfordRunningStat(1)
                 self.agent.obs_stats.from_json(book_keeping_vars["obs_running_stats"])
-            if self.standardize_returns and "reward_running_stats" in book_keeping_vars.keys():
+            if (
+                self.standardize_returns
+                and "reward_running_stats" in book_keeping_vars.keys()
+            ):
                 self.return_stats.from_json(book_keeping_vars["reward_running_stats"])
 
             self.epoch = book_keeping_vars["epoch"]
-            
+
             # Update learning rates if new values are provided
             if new_policy_lr is not None or new_critic_lr is not None:
                 self.update_learning_rate(new_policy_lr, new_critic_lr)
@@ -507,6 +542,6 @@ class Learner(object):
 
         if self.wandb_run is not None:
             self.wandb_run.finish()
-        if type(self.agent) == BatchedAgentManager:
+        if type(self.agent) is BatchedAgentManager:
             self.agent.cleanup()
         self.experience_buffer.clear()

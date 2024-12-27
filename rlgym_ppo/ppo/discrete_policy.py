@@ -3,14 +3,12 @@ File: discrete_policy.py
 Author: Matthew Allen
 
 Description:
-    An implementation of a feed-forward neural network which parametrizes a discrete distribution over a space of actions.
+    An optimized implementation of a feed-forward neural network which parametrizes a discrete distribution over a space of actions.
 """
 
-
-from torch.distributions import Categorical
-import torch.nn as nn
 import torch
-import numpy as np
+import torch.nn as nn
+from torch.distributions import Categorical
 
 
 class DiscreteFF(nn.Module):
@@ -18,7 +16,9 @@ class DiscreteFF(nn.Module):
         super().__init__()
         self.device = device
 
-        assert len(layer_sizes) != 0, "AT LEAST ONE LAYER MUST BE SPECIFIED TO BUILD THE NEURAL NETWORK!"
+        assert (
+            len(layer_sizes) != 0
+        ), "AT LEAST ONE LAYER MUST BE SPECIFIED TO BUILD THE NEURAL NETWORK!"
         layers = [nn.Linear(input_shape, layer_sizes[0]), nn.ReLU()]
         prev_size = layer_sizes[0]
         for size in layer_sizes[1:]:
@@ -27,18 +27,12 @@ class DiscreteFF(nn.Module):
             prev_size = size
 
         layers.append(nn.Linear(layer_sizes[-1], n_actions))
-        layers.append(nn.Softmax(dim=-1))
         self.model = nn.Sequential(*layers).to(self.device)
-
         self.n_actions = n_actions
 
     def get_output(self, obs):
-        t = type(obs)
-        if t != torch.Tensor:
-            if t != np.array:
-                obs = np.asarray(obs)
+        if not isinstance(obs, torch.Tensor):
             obs = torch.as_tensor(obs, dtype=torch.float32, device=self.device)
-
         return self.model(obs)
 
     def get_action(self, obs, deterministic=False):
@@ -48,16 +42,14 @@ class DiscreteFF(nn.Module):
         :param deterministic: Whether the action should be chosen deterministically.
         :return: Chosen action and its logprob.
         """
-
-        probs = self.get_output(obs)
-        probs = probs.view(-1, self.n_actions)
-        probs = torch.clamp(probs, min=1e-11, max=1)
-
+        logits = self.get_output(obs)
         if deterministic:
-            return probs.cpu().numpy().argmax(), 0
-
-        action = torch.multinomial(probs, 1, True)
-        log_prob = torch.log(probs).gather(-1, action)
+            action = logits.argmax(dim=-1).cpu()
+            log_prob = torch.zeros_like(action)
+        else:
+            dist = Categorical(logits=logits)
+            action = dist.sample()
+            log_prob = dist.log_prob(action)
 
         return action.flatten().cpu(), log_prob.flatten().cpu()
 
@@ -68,13 +60,10 @@ class DiscreteFF(nn.Module):
         :param acts: Actions taken by the policy.
         :return: Action log probs & entropy.
         """
-        acts = acts.long()
-        probs = self.get_output(obs)
-        probs = probs.view(-1, self.n_actions)
-        probs = torch.clamp(probs, min=1e-11, max=1)
+        acts = acts.long().to(self.device)
+        logits = self.get_output(obs)
+        dist = Categorical(logits=logits)
+        action_log_probs = dist.log_prob(acts)
+        entropy = dist.entropy().mean()
 
-        log_probs = torch.log(probs)
-        action_log_probs = log_probs.gather(-1, acts)
-        entropy = -(log_probs * probs).sum(dim=-1)
-
-        return action_log_probs.to(self.device), entropy.to(self.device).mean()
+        return action_log_probs, entropy

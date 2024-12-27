@@ -16,8 +16,8 @@ import time
 from typing import Union
 
 import numpy as np
-from numpy import frombuffer, prod
 import torch
+from numpy import frombuffer, prod
 
 from rlgym_ppo.batched_agents import BatchedTrajectory, comm_consts
 from rlgym_ppo.batched_agents.batched_agent import batched_agent_process
@@ -67,7 +67,6 @@ class BatchedAgentManager(object):
         self.completed_trajectories = []
 
         self.n_procs = 0
-        import struct
 
         self.packed_header = comm_consts.pack_message(comm_consts.POLICY_ACTIONS_HEADER)
 
@@ -140,7 +139,7 @@ class BatchedAgentManager(object):
                     trajectory_rewards,
                     trajectory_next_states,
                     trajectory_dones,
-                    trajectory_truncated
+                    trajectory_truncated,
                 ) = traj
                 trajectory_truncated[-1] = 1 if trajectory_dones[-1] == 0 else 0
 
@@ -255,7 +254,9 @@ class BatchedAgentManager(object):
         self, proc_id, parent_end, shm_view, collected_metrics, obs_mean, obs_std
     ):
         available_data = parent_end.recv(PACKET_MAX_SIZE)
-        header = frombuffer(available_data, dtype=np.float32, count=comm_consts.HEADER_LEN)
+        header = frombuffer(
+            available_data, dtype=np.float32, count=comm_consts.HEADER_LEN
+        )
 
         if header[0] != comm_consts.ENV_STEP_DATA_HEADER[0]:
             return 0
@@ -280,8 +281,7 @@ class BatchedAgentManager(object):
             state_shape = [
                 int(arg)
                 for arg in shm_view[
-                    state_shape_start : state_shape_start
-                    + n_elements_in_state_shape
+                    state_shape_start : state_shape_start + n_elements_in_state_shape
                 ]
             ]
 
@@ -289,11 +289,18 @@ class BatchedAgentManager(object):
         rew_end = rew_start + prev_n_agents
 
         shm_shapes = self.shm_shapes[proc_id]
-        if shm_shapes is None or shm_shapes != (metrics_shape, state_shape, prev_n_agents):
+        if shm_shapes is None or shm_shapes != (
+            metrics_shape,
+            state_shape,
+            prev_n_agents,
+        ):
             self.shm_shapes[proc_id] = (metrics_shape, state_shape, prev_n_agents)
-            rews = np.reshape(shm_view[rew_start : rew_end], (rew_end - rew_start,))
+            rews = np.reshape(shm_view[rew_start:rew_end], (rew_end - rew_start,))
             metrics = np.reshape(shm_view[rew_end : rew_end + n_metrics], metrics_shape)
-            obs = np.reshape(shm_view[rew_end + n_metrics : rew_end + n_metrics + prod(state_shape)], state_shape)
+            obs = np.reshape(
+                shm_view[rew_end + n_metrics : rew_end + n_metrics + prod(state_shape)],
+                state_shape,
+            )
             self.shm_cache[proc_id] = (rews, metrics, obs)
 
         rews, metrics, next_observation = self.shm_cache[proc_id]
@@ -301,10 +308,7 @@ class BatchedAgentManager(object):
         collected_metrics.append(metrics.copy())
 
         if self.standardize_obs:
-            if (
-                self.steps_since_obs_stats_update
-                > self.steps_per_obs_stats_increment
-            ):
+            if self.steps_since_obs_stats_update > self.steps_per_obs_stats_increment:
                 self.obs_stats.increment(next_observation, state_shape[0])
                 self.steps_since_obs_stats_update = 0
             else:
@@ -414,7 +418,7 @@ class BatchedAgentManager(object):
         spawn_delay=None,
         render=False,
         render_delay: Union[float, None] = None,
-        shm_buffer_size = 8192
+        shm_buffer_size=8192,
     ):
         """
         Initialize and spawn environment processes.
@@ -434,8 +438,11 @@ class BatchedAgentManager(object):
         self.n_procs = n_processes
 
         import multiprocessing.sharedctypes
+
         self.shm_size = shm_buffer_size // 4
-        self.shm_buffer = multiprocessing.sharedctypes.RawArray('f', n_processes * self.shm_size)
+        self.shm_buffer = multiprocessing.sharedctypes.RawArray(
+            "f", n_processes * self.shm_size
+        )
         self.shm_shapes = [None for i in range(n_processes)]
         self.shm_cache = [None for i in range(n_processes)]
         self.processes = [None for i in range(n_processes)]
@@ -469,7 +476,12 @@ class BatchedAgentManager(object):
             )
             process.start()
 
-            shm_view = frombuffer(buffer=self.shm_buffer, dtype=np.float32, offset=shm_offset, count=self.shm_size)
+            shm_view = frombuffer(
+                buffer=self.shm_buffer,
+                dtype=np.float32,
+                offset=shm_offset,
+                count=self.shm_size,
+            )
 
             self.processes[proc_id] = (process, parent_end, shm_view)
 

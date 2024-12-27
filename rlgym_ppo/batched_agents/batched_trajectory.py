@@ -27,20 +27,32 @@ class BatchedTrajectory(object):
         """
 
         # If every class attribute is populated
-        if self.state is not None and\
-           self.action is not None and\
-           self.log_prob is not None and\
-           self.reward is not None and\
-           self.next_state is not None and\
-           self.done is not None and\
-           self.truncated is not None:
+        if (
+            self.state is not None
+            and self.action is not None
+            and self.log_prob is not None
+            and self.reward is not None
+            and self.next_state is not None
+            and self.done is not None
+            and self.truncated is not None
+        ):
 
             # If there is only a single agent in the match, create a list out of the scalar values.
             if type(self.reward) not in (list, tuple, np.ndarray):
                 self.reward = [self.reward]
 
             # Append timestep data to our sequence and reset all class attributes.
-            self.complete_timesteps.append((self.state, self.action, self.log_prob, self.reward, self.next_state, self.done, self.truncated))
+            self.complete_timesteps.append(
+                (
+                    self.state,
+                    self.action,
+                    self.log_prob,
+                    self.reward,
+                    self.next_state,
+                    self.done,
+                    self.truncated,
+                )
+            )
             done = self.done
 
             self.state = None
@@ -54,7 +66,7 @@ class BatchedTrajectory(object):
                 return True
 
         return False
-        
+
     def get_all(self):
         """
         Function to retrieve and erase all timestep sequences tracked by this object.
@@ -82,7 +94,15 @@ class BatchedTrajectory(object):
 
             # Acquire all the timesteps from the current trajectory and append them to our lists.
             for timestep in self.complete_timesteps:
-                state, action, log_prob, reward, next_trajectory_state, done, truncated = timestep
+                (
+                    state,
+                    action,
+                    log_prob,
+                    reward,
+                    next_trajectory_state,
+                    done,
+                    truncated,
+                ) = timestep
 
                 # if the team size has changed insert dummy data into the next state
                 if i >= len(next_trajectory_state):
@@ -98,7 +118,9 @@ class BatchedTrajectory(object):
                 rewards.append(reward[i])
                 truncateds.append(truncated)
 
-            trajectories.append([states, actions, log_probs, rewards, next_states, dones, truncateds])
+            trajectories.append(
+                [states, actions, log_probs, rewards, next_states, dones, truncateds]
+            )
 
         # Reset our trajectory buffer and return all trajectories.
         self.complete_timesteps = []
