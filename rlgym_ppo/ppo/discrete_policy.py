@@ -6,9 +6,11 @@ Description:
     An implementation of a feed-forward neural network which parametrizes a discrete distribution over a space of actions.
 """
 
-import numpy as np
-import torch
+
+from torch.distributions import Categorical
 import torch.nn as nn
+import torch
+import numpy as np
 
 
 class DiscreteFF(nn.Module):
@@ -16,9 +18,7 @@ class DiscreteFF(nn.Module):
         super().__init__()
         self.device = device
 
-        assert (
-            len(layer_sizes) != 0
-        ), "AT LEAST ONE LAYER MUST BE SPECIFIED TO BUILD THE NEURAL NETWORK!"
+        assert len(layer_sizes) != 0, "AT LEAST ONE LAYER MUST BE SPECIFIED TO BUILD THE NEURAL NETWORK!"
         layers = [nn.Linear(input_shape, layer_sizes[0]), nn.ReLU()]
         prev_size = layer_sizes[0]
         for size in layer_sizes[1:]:
