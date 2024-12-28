@@ -28,12 +28,13 @@ class DiscreteFF(nn.Module):
 
         layers.append(nn.Linear(layer_sizes[-1], n_actions))
         self.model = nn.Sequential(*layers).to(self.device)
+        self.softmax = nn.Softmax(dim=-1)
         self.n_actions = n_actions
 
     def get_output(self, obs):
         if not isinstance(obs, torch.Tensor):
             obs = torch.as_tensor(obs, dtype=torch.float32, device=self.device)
-        return self.model(obs)
+        return self.softmax(self.model(obs))
 
     def get_action(self, obs, deterministic=False):
         """
