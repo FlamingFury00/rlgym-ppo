@@ -127,7 +127,7 @@ def batched_agent_process(
                 else:
                     obs, rew, done, truncated, info = step_data
 
-                if n_agents == 1:
+                if n_agents == 1 and type(rew) is not list:
                     rew = [float(rew)]
 
                 if done or truncated:
