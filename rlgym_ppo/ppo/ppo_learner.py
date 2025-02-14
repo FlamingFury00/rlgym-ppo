@@ -55,9 +55,11 @@ class PPOLearner(object):
         self.num_mini_batches = batch_size // mini_batch_size  # Pre-calculate
 
         self.policy_optimizer = torch.optim.Adam(self.policy.parameters(), lr=policy_lr)
-        self.value_optimizer = torch.optim.Adam(
-            self.value_net.parameters(), lr=critic_lr
-        )
+        self.value_optimizer = torch.optim.Adam(self.value_net.parameters(), lr=critic_lr)
+
+        # Add learning rate schedulers
+        self.policy_scheduler = torch.optim.lr_scheduler.StepLR(self.policy_optimizer, step_size=10, gamma=0.9)
+        self.value_scheduler = torch.optim.lr_scheduler.StepLR(self.value_optimizer, step_size=10, gamma=0.9)
         self.value_loss_fn = torch.nn.MSELoss()
 
         # Calculate and print parameter counts (moved to init for clarity)
@@ -111,10 +113,9 @@ class PPOLearner(object):
         ).cpu()
 
         t1 = time.time()
+        accumulation_steps = 4  # Number of steps to accumulate gradients
         for epoch in range(self.n_epochs):
-            for batch in exp.get_all_batches_shuffled(
-                self.mini_batch_size
-            ):  # Iterate over minibatches directly
+            for i, batch in enumerate(exp.get_all_batches_shuffled(self.mini_batch_size)):
                 (
                     batch_acts,
                     batch_old_probs,
@@ -128,8 +129,9 @@ class PPOLearner(object):
                 batch_target_values = batch_target_values.to(self.device)
                 batch_advantages = batch_advantages.to(self.device)
 
-                self.policy_optimizer.zero_grad(set_to_none=True)
-                self.value_optimizer.zero_grad(set_to_none=True)
+                if i % accumulation_steps == 0:
+                    self.policy_optimizer.zero_grad(set_to_none=True)
+                    self.value_optimizer.zero_grad(set_to_none=True)
 
                 # Compute value estimates.
                 vals = self.value_net(batch_obs).view_as(batch_target_values)
@@ -170,13 +172,18 @@ class PPOLearner(object):
                     )
                     clip_fractions.append(clip_fraction)
 
-                torch.nn.utils.clip_grad_norm_(
-                    self.value_net.parameters(), max_norm=0.5
-                )
+                # Clip gradients for stability
+                torch.nn.utils.clip_grad_norm_(self.value_net.parameters(), max_norm=0.5)
                 torch.nn.utils.clip_grad_norm_(self.policy.parameters(), max_norm=0.5)
 
-                self.policy_optimizer.step()
-                self.value_optimizer.step()
+                # Perform optimizer step after accumulation
+                if (i + 1) % accumulation_steps == 0 or (i + 1) == len(exp.buffer):
+                    self.policy_optimizer.step()
+                    self.value_optimizer.step()
+
+            # Step the learning rate schedulers
+            self.policy_scheduler.step()
+            self.value_scheduler.step()
                 n_iterations += 1
 
         if n_iterations == 0:
@@ -186,6 +193,15 @@ class PPOLearner(object):
         mean_divergence /= n_iterations
         mean_val_loss /= n_iterations
         mean_clip = np.mean(clip_fractions) if clip_fractions else 0
+
+        # Log gradient norms and learning rates
+        with torch.no_grad():
+            policy_grad_norm = torch.norm(torch.stack([torch.norm(p.grad) for p in self.policy.parameters() if p.grad is not None]))
+            value_grad_norm = torch.norm(torch.stack([torch.norm(p.grad) for p in self.value_net.parameters() if p.grad is not None]))
+        report["Policy Gradient Norm"] = policy_grad_norm.item()
+        report["Value Gradient Norm"] = value_grad_norm.item()
+        report["Policy Learning Rate"] = self.policy_scheduler.get_last_lr()[0]
+        report["Value Learning Rate"] = self.value_scheduler.get_last_lr()[0]
 
         policy_after = torch.nn.utils.parameters_to_vector(
             self.policy.parameters()

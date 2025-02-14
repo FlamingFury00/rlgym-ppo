@@ -248,7 +248,7 @@ class Learner(object):
         except Exception:
             import traceback
 
-            print("\n\nLEARNING LOOP ENCOUNTERED AN ERROR\n")
+            print("\\n\\nLEARNING LOOP ENCOUNTERED AN ERROR\\n")
             traceback.print_exc()
 
             try:
@@ -267,7 +267,7 @@ class Learner(object):
 
         kb = KBHit()
         print(
-            "Press (p) to pause (c) to checkpoint, (q) to checkpoint and quit (after next iteration)\n"
+            "Press (p) to pause (c) to checkpoint, (q) to checkpoint and quit (after next iteration)\\n"
         )
 
         while self.agent.cumulative_timesteps < self.timestep_limit:
@@ -339,7 +339,7 @@ class Learner(object):
                 if c == "q":
                     return
                 if c in ("c", "p"):
-                    print("Resuming...\n")
+                    print("Resuming...\\n")
 
             if self.ts_since_last_save >= self.save_every_ts:
                 self.save(self.agent.cumulative_timesteps)
@@ -354,47 +354,27 @@ class Learner(object):
 
         # Move data to the target device once here
         states_tensor = torch.as_tensor(states, dtype=torch.float32, device=self.device)
-        next_states_tensor = torch.as_tensor(
-            next_states, dtype=torch.float32, device=self.device
-        )
-        rewards_tensor = torch.as_tensor(
-            rewards, dtype=torch.float32, device=self.device
-        )
+        next_states_tensor = torch.as_tensor(next_states, dtype=torch.float32, device=self.device)
+        rewards_tensor = torch.as_tensor(rewards, dtype=torch.float32, device=self.device)
         dones_tensor = torch.as_tensor(dones, dtype=torch.float32, device=self.device)
-        truncated_tensor = torch.as_tensor(
-            truncated, dtype=torch.float32, device=self.device
-        )
+        truncated_tensor = torch.as_tensor(truncated, dtype=torch.float32, device=self.device)
 
         # Construct input for value function estimator
-        if next_states_tensor.numel() > 0:
-            val_inp = torch.cat(
-                (states_tensor, next_states_tensor[-1].unsqueeze(0)), dim=0
-            )
-        else:
-            val_inp = states_tensor  # Use only states if next_states is empty
+        val_inp = torch.cat((states_tensor, next_states_tensor[-1].unsqueeze(0)), dim=0) if next_states_tensor.numel() > 0 else states_tensor
 
         # Predict expected returns
         val_preds = value_net(val_inp).flatten()
 
-        # Compute GAE
+        # Compute GAE directly on GPU
         ret_std = self.return_stats.std[0] if self.standardize_returns else None
-        value_targets, advantages, returns = torch_functions.compute_gae(
-            rewards_tensor.cpu().numpy().tolist(),
-            dones_tensor.cpu().numpy().tolist(),
-            truncated_tensor.cpu().numpy().tolist(),
-            val_preds.cpu()
-            .numpy()
-            .tolist(),  # Compute GAE on CPU for now, can optimize later
-            gamma=self.gae_gamma,
-            lmbda=self.gae_lambda,
-            return_std=ret_std,
+        value_targets, advantages, returns = torch_functions.compute_gae_torch(
+            rewards_tensor, dones_tensor, truncated_tensor, val_preds, 
+            gamma=self.gae_gamma, lmbda=self.gae_lambda, return_std=ret_std
         )
-        value_targets = torch.as_tensor(
-            value_targets, dtype=torch.float32, device=self.device
-        )
-        advantages = torch.as_tensor(
-            advantages, dtype=torch.float32, device=self.device
-        )
+
+        # Pre-allocate tensors for value_targets and advantages
+        value_targets = torch.as_tensor(value_targets, dtype=torch.float32, device=self.device)
+        advantages = torch.as_tensor(advantages, dtype=torch.float32, device=self.device)
 
         if self.standardize_returns:
             n_to_increment = min(self.max_returns_per_stats_increment, len(returns))
@@ -409,7 +389,7 @@ class Learner(object):
             next_states,
             dones,
             truncated,
-            value_targets.cpu().numpy(),  # Keep in numpy for buffer (optimized in prev step)
+            value_targets.cpu().numpy(),  # Convert to numpy for buffer compatibility
             advantages.cpu().numpy(),
         )
 
@@ -469,7 +449,7 @@ class Learner(object):
         with open(book_keeping_table_path, "w") as f:
             json.dump(book_keeping_vars, f, indent=4)
 
-        print(f"Checkpoint {cumulative_timesteps} saved!\n")
+        print(f"Checkpoint {cumulative_timesteps} saved!\\n")
 
     def load(self, folder_path, load_wandb, new_policy_lr=None, new_critic_lr=None):
         """

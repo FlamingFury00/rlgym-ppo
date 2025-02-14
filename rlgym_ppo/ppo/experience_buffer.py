@@ -21,6 +21,7 @@ class ExperienceBuffer(object):
         self.max_size = max_size
         self.buffer = deque(maxlen=max_size)  # Use deque for efficient FIFO
         self.rng = np.random.RandomState(seed)
+        self.priorities = deque(maxlen=max_size)  # Store priorities for PER
 
     def submit_experience(
         self,
@@ -59,6 +60,7 @@ class ExperienceBuffer(object):
         np_values = np.asarray(values)
         np_advantages = np.asarray(advantages)
 
+        max_priority = max(self.priorities) if self.priorities else 1.0  # Default max priority
         for i in range(len(np_rewards)):
             self.buffer.append(
                 (
@@ -73,8 +75,14 @@ class ExperienceBuffer(object):
                     np_advantages[i],
                 )
             )
+            self.priorities.append(max_priority)  # Assign max priority to new experiences
 
     def _get_samples(self, indices):
+        # Sample indices based on priorities
+        probabilities = np.array(self.priorities) ** 0.6  # Exponent for prioritization
+        probabilities /= probabilities.sum()  # Normalize to create a probability distribution
+        indices = self.rng.choice(len(self.buffer), size=len(indices), p=probabilities)
+
         batch = [self.buffer[i] for i in indices]
         # Stack the numpy arrays and convert to tensors once
         actions = torch.as_tensor(
@@ -121,9 +129,20 @@ class ExperienceBuffer(object):
             batch_indices = indices[start_idx : start_idx + batch_size]
             yield self._get_samples(batch_indices)
 
+    def update_priorities(self, indices, new_priorities):
+        """
+        Update priorities for sampled experiences.
+        :param indices: List of indices for the sampled experiences.
+        :param new_priorities: List of new priorities corresponding to the indices.
+        :return: None
+        """
+        for idx, priority in zip(indices, new_priorities):
+            self.priorities[idx] = priority
+
     def clear(self):
         """
         Function to clear the experience buffer.
         :return: None.
         """
         self.buffer.clear()
+        self.priorities.clear()
