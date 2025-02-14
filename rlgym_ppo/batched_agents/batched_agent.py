@@ -61,13 +61,21 @@ def batched_agent_process(
     pipe.sendto(b"0", endpoint)
 
     # Wait for initialization data from the learner.
-    while env is None:
-        data = pickle.loads(pipe.recv(4096))
-        if data[0] == "initialization_data":
-            build_env_fn = data[1]
-            metrics_encoding_function = data[2]
+    try:
+        while env is None:
+            data = pickle.loads(pipe.recv(4096))
+            if data[0] == "initialization_data":
+                build_env_fn = data[1]
+                metrics_encoding_function = data[2]
 
-            env = build_env_fn()
+                env = build_env_fn()
+                print(f"[INFO] Process {proc_id}: Environment initialized successfully.")
+    except Exception as e:
+        print(f"[ERROR] Process {proc_id}: Failed to initialize environment: {e}")
+        import traceback
+        traceback.print_exc()
+        pipe.close()
+        return
 
     # Seed everything.
     env.action_space.seed(seed)
@@ -101,8 +109,15 @@ def batched_agent_process(
         last_render_time = time.time()
         render_time_compensation = 0
         while True:
-            message_bytes = pipe.recv(4096)
-            message = frombuffer(message_bytes, dtype=np.float32)
+            try:
+                message_bytes = pipe.recv(4096)
+                message = frombuffer(message_bytes, dtype=np.float32)
+                print(f"[INFO] Process {proc_id}: Received message with header {message[:header_len]}.")
+            except Exception as e:
+                print(f"[ERROR] Process {proc_id}: Failed to receive or process message: {e}")
+                import traceback
+                traceback.print_exc()
+                break
             # message = byte_headers.unpack_message(message_bytes)
             header = message[:header_len]
 
@@ -120,7 +135,13 @@ def batched_agent_process(
                         ]
 
                 # print("got actions", action_buffer.shape,"|",n_agents,"|",prev_n_agents)
-                step_data = env.step(action_buffer)
+                try:
+                    step_data = env.step(action_buffer)
+                except Exception as e:
+                    print(f"[ERROR] Process {proc_id}: Failed to step environment: {e}")
+                    import traceback
+                    traceback.print_exc()
+                    break
                 if len(step_data) == 4:
                     truncated = False
                     obs, rew, done, info = step_data
@@ -250,5 +271,18 @@ def batched_agent_process(
         traceback.print_exc()
 
     finally:
-        pipe.close()
-        env.close()
+        try:
+            pipe.close()
+            print(f"[INFO] Process {proc_id}: Pipe closed successfully.")
+        except Exception as e:
+            print(f"[ERROR] Process {proc_id}: Failed to close pipe: {e}")
+            import traceback
+            traceback.print_exc()
+
+        try:
+            env.close()
+            print(f"[INFO] Process {proc_id}: Environment closed successfully.")
+        except Exception as e:
+            print(f"[ERROR] Process {proc_id}: Failed to close environment: {e}")
+            import traceback
+            traceback.print_exc()

@@ -33,6 +33,7 @@ class Config:
     PPO_CLIP_RANGE: float = 0.2  # Clipping range for PPO updates.
     PPO_MAX_GRAD_NORM: float = 0.5  # Maximum gradient norm for clipping.
     PPO_KL_TARGET: float = 0.01  # Target KL divergence for policy updates.
+    PPO_KL_TARGET: float = 0.01  # Target KL divergence for policy updates.
 
     # Learning Rates
     POLICY_LR: float = 3e-4  # Learning rate for the policy network.
@@ -58,6 +59,7 @@ class Config:
     # Logging and Checkpointing
     LOG_TO_WANDB: bool = True  # Whether to log metrics to Weights & Biases.
     WANDB_PROJECT_NAME: str = "rlgym-ppo"  # Default project name for Weights & Biases.
+    WANDB_RUN_NAME: Union[str, None] = None  # Custom run name for Weights & Biases.
     WANDB_GROUP_NAME: str = "default-group"  # Default group name for Weights & Biases runs.
     CHECKPOINTS_SAVE_FOLDER: Union[str, None] = "data/checkpoints/rlgym-ppo-run"  # Folder to save checkpoints.
     N_CHECKPOINTS_TO_KEEP: int = 5  # Number of checkpoints to keep.
@@ -84,6 +86,11 @@ class Config:
         """
         for key, value in kwargs.items():
             if hasattr(cls, key):
+                # Add validation for specific parameters
+                if key in {"PPO_BATCH_SIZE", "PPO_MINIBATCH_SIZE", "N_PROC"} and value <= 0:
+                    raise ValueError(f"{key} must be a positive integer.")
+                if key in {"PPO_ENT_COEF", "PPO_CLIP_RANGE", "GAE_LAMBDA", "GAE_GAMMA"} and not (0 <= value <= 1):
+                    raise ValueError(f"{key} must be between 0 and 1.")
                 setattr(cls, key, value)
             else:
                 raise AttributeError(f"Config has no attribute '{key}'")

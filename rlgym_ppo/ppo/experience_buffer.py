@@ -128,4 +128,4 @@ class ExperienceBuffer(object):
         Function to clear the experience buffer.
         :return: None.
         """
-        self.buffer.clear
+        self.buffer.clear()

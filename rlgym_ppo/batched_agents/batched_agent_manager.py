@@ -1,13 +1,3 @@
-"""
-File: batched_agent_manager.py
-Author: Matthew Allen
-
-Description:
-    A class to manage the multi-processed agents interacting with instances of the environment. This class is responsible
-    for spawning and closing the individual processes, interacting with them through their respective pipes, and organizing
-    the trajectories from each instance of the environment.
-"""
-
 import multiprocessing as mp
 import pickle
 import selectors
@@ -216,6 +206,7 @@ class BatchedAgentManager(object):
                 parent_end.sendto(packet, child_endpoint)
             except Exception as e:
                 print(f"[ERROR] Failed to send actions to process {proc_id}: {e}")
+                print(f"Process ID: {proc_id}, Action Shape: {action.shape}, Log Prob Shape: {logp.shape}")
             self.trajectory_map[proc_id].action = action
             self.trajectory_map[proc_id].log_prob = logp
             self.trajectory_map[proc_id].state = state
@@ -254,7 +245,6 @@ class BatchedAgentManager(object):
                     )
                 except Exception as e:
                     print(f"[ERROR] Failed to collect response from process {proc_id}: {e}")
-                # print(n_collected, "|", len(collected_metrics))
 
         return collected_metrics, n_collected
 
@@ -484,7 +474,11 @@ class BatchedAgentManager(object):
                 ),
             )
             try:
-                process.start()
+                try:
+                    process.start()
+                    print(f"[INFO] Process {proc_id} started successfully.")
+                except Exception as e:
+                    print(f"[ERROR] Failed to start process {proc_id}: {e}")
                 print(f"[INFO] Process {proc_id} started successfully.")
             except Exception as e:
                 print(f"[ERROR] Failed to start process {proc_id}: {e}")
@@ -533,10 +527,9 @@ class BatchedAgentManager(object):
                     child_endpoint,
                 )
             except Exception:
-                print(f"[ERROR] Unable to join process {proc_id}")
+                print(f"[ERROR] Unable to send stop signal to process {proc_id}")
                 traceback.print_exc()
-                print("Failed to send stop signal to child process!")
-                traceback.print_exc()
+                print(f"[ERROR] Failed to send stop signal to child process {proc_id}.")
 
             try:
                 process.join()
