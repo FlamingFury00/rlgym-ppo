@@ -1,14 +1,3 @@
-   - Ensure the content is clear, concise, and beginner-friendly.
-
-5. **Review**:
-   - Verify that the file meets the requirements.
-   - Ensure the examples are functional and align with the existing codebase.
-
----
-
-### Full File Content
-
-```
 # Tutorials and Examples
 
 This document provides step-by-step tutorials and examples to help you get started with the `rlgym-ppo` library. Whether you're a beginner or an experienced user, these examples will guide you through various use cases and configurations.
