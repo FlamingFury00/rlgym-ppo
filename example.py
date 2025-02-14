@@ -32,29 +32,58 @@ def build_rocketsim_env():
     from rlgym_sim.utils import common_values
     from rlgym_sim.utils.action_parsers import ContinuousAction
 
+    # Whether to spawn opponents in the environment.
     spawn_opponents = True
+
+    # Number of players per team.
     team_size = 1
-    game_tick_rate = 120
-    tick_skip = 8
-    timeout_seconds = 10
-    timeout_ticks = int(round(timeout_seconds * game_tick_rate / tick_skip))
+
+    # Game tick rate and tick skip determine the simulation speed.
+    game_tick_rate = 120  # Ticks per second in the simulation.
+    tick_skip = 8  # Number of ticks to skip per action.
+
+    # Timeout settings for terminating episodes.
+    timeout_seconds = 10  # Maximum time (in seconds) before timeout.
+    max_timeout_ticks = int(round(timeout_seconds * game_tick_rate / tick_skip))  # Convert to ticks.
 
     action_parser = ContinuousAction()
     terminal_conditions = [NoTouchTimeoutCondition(timeout_ticks), GoalScoredCondition()]
 
-    rewards_to_combine = (VelocityPlayerToBallReward(),
-                          VelocityBallToGoalReward(),
-                          EventReward(team_goal=1, concede=-1, demo=0.1))
+    # Example 1: Default reward function combining multiple objectives.
+    rewards_to_combine = (
+        VelocityPlayerToBallReward(),
+        VelocityBallToGoalReward(),
+        EventReward(team_goal=1, concede=-1, demo=0.1)
+    )
     reward_weights = (0.01, 0.1, 10.0)
+
+    # Example 2: Alternative reward function focusing on ball control and scoring.
+    # Uncomment the following lines to use this reward function instead.
+    # rewards_to_combine = (
+    #     EventReward(team_goal=2, concede=-2),  # Higher weight for scoring goals.
+    #     VelocityBallToGoalReward(),  # Encourage moving the ball toward the goal.
+    # )
+    # reward_weights = (1.0, 0.5)
 
     reward_fn = CombinedReward(reward_functions=rewards_to_combine,
                                reward_weights=reward_weights)
 
+    # Example 1: Default observation builder with normalized coefficients.
     obs_builder = DefaultObs(
         pos_coef=np.asarray([1 / common_values.SIDE_WALL_X, 1 / common_values.BACK_NET_Y, 1 / common_values.CEILING_Z]),
         ang_coef=1 / np.pi,
         lin_vel_coef=1 / common_values.CAR_MAX_SPEED,
-        ang_vel_coef=1 / common_values.CAR_MAX_ANG_VEL)
+        ang_vel_coef=1 / common_values.CAR_MAX_ANG_VEL
+    )
+
+    # Example 2: Alternative observation builder with custom scaling.
+    # Uncomment the following lines to use this observation builder instead.
+    # obs_builder = DefaultObs(
+    #     pos_coef=np.asarray([1 / 4096, 1 / 5120, 1 / 2044]),  # Custom field dimensions.
+    #     ang_coef=1 / (2 * np.pi),  # Adjust angular normalization.
+    #     lin_vel_coef=1 / 2300,  # Custom max speed normalization.
+    #     ang_vel_coef=1 / 5.5  # Custom angular velocity normalization.
+    # )
 
     env = rlgym_sim.make(tick_skip=tick_skip,
                          team_size=team_size,
@@ -71,24 +100,28 @@ if __name__ == "__main__":
     metrics_logger = ExampleLogger()
 
     # 32 processes
-    n_proc = 32
+    # Number of processes to run in parallel for data collection.
+    num_processes = 32
 
-    # educated guess - could be slightly higher or lower
-    min_inference_size = max(1, int(round(n_proc * 0.9)))
+    # Minimum number of observations required for inference.
+    min_inference_size = max(1, int(round(num_processes * 0.9)))  # Adjust based on process count.
 
-    learner = Learner(build_rocketsim_env,
-                      n_proc=n_proc,
-                      min_inference_size=min_inference_size,
-                      metrics_logger=metrics_logger,
-                      ppo_batch_size=50000,
-                      ts_per_iteration=50000,
-                      exp_buffer_size=150000,
-                      ppo_minibatch_size=50000,
-                      ppo_ent_coef=0.001,
-                      ppo_epochs=1,
-                      standardize_returns=True,
-                      standardize_obs=False,
-                      save_every_ts=100_000,
-                      timestep_limit=1_000_000_000,
-                      log_to_wandb=True)
+    # Initialize the PPO learner with the specified environment and configurations.
+    learner = Learner(
+        build_rocketsim_env,  # Function to create the environment.
+        n_proc=num_processes,  # Number of parallel processes.
+        min_inference_size=min_inference_size,  # Minimum batch size for inference.
+        metrics_logger=metrics_logger,  # Logger for tracking metrics.
+        ppo_batch_size=50000,  # Batch size for PPO updates.
+        ts_per_iteration=50000,  # Timesteps per training iteration.
+        exp_buffer_size=150000,  # Experience buffer size.
+        ppo_minibatch_size=50000,  # Minibatch size for PPO updates.
+        ppo_ent_coef=0.001,  # Entropy coefficient for exploration.
+        ppo_epochs=1,  # Number of PPO epochs per iteration.
+        standardize_returns=True,  # Normalize returns for stability.
+        standardize_obs=False,  # Disable observation normalization.
+        save_every_ts=100_000,  # Save model every 100,000 timesteps.
+        timestep_limit=1_000_000_000,  # Maximum timesteps for training.
+        log_to_wandb=True  # Enable logging to Weights & Biases.
+    )
     learner.learn()

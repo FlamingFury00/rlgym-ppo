@@ -5,7 +5,8 @@ Author: Matthew Allen
 Description:
     A buffer containing the experience to be learned from on this iteration. The buffer may be added to, removed from,
     and shuffled. When the maximum specified size of the buffer is exceeded, the least recent entries will be removed in
-    a FIFO fashion.
+    a FIFO fashion. The buffer supports prioritized experience replay, where experiences are sampled with probabilities
+    proportional to their priorities (based on advantage magnitude).
 """
 
 from collections import deque
@@ -48,18 +49,20 @@ class ExperienceBuffer(object):
         :param advantages: The advantage of each action at each state in `states` and `actions`
 
         :return: None
+        Note: This method now uses `np.float16` for memory efficiency and assigns a priority to each experience based on its advantage.
         """
-        np_states = np.asarray(states)
-        np_actions = np.asarray(actions)
-        np_log_probs = np.asarray(log_probs)
-        np_rewards = np.asarray(rewards)
-        np_next_states = np.asarray(next_states)
-        np_dones = np.asarray(dones)
-        np_truncated = np.asarray(truncated)
-        np_values = np.asarray(values)
-        np_advantages = np.asarray(advantages)
+        np_states = np.asarray(states, dtype=np.float16)
+        np_actions = np.asarray(actions, dtype=np.float16)
+        np_log_probs = np.asarray(log_probs, dtype=np.float16)
+        np_rewards = np.asarray(rewards, dtype=np.float16)
+        np_next_states = np.asarray(next_states, dtype=np.float16)
+        np_dones = np.asarray(dones, dtype=np.float16)
+        np_truncated = np.asarray(truncated, dtype=np.float16)
+        np_values = np.asarray(values, dtype=np.float16)
+        np_advantages = np.asarray(advantages, dtype=np.float16)
 
         for i in range(len(np_rewards)):
+            priority = abs(np_advantages[i]) + 1e-6  # Priority based on advantage magnitude
             self.buffer.append(
                 (
                     np_states[i],
@@ -71,11 +74,18 @@ class ExperienceBuffer(object):
                     np_truncated[i],
                     np_values[i],
                     np_advantages[i],
+                    priority,
                 )
             )
 
     def _get_samples(self, indices):
-        batch = [self.buffer[i] for i in indices]
+        # Normalize priorities to sum to 1
+        priorities = np.array([item[-1] for item in self.buffer], dtype=np.float32)
+        probabilities = priorities / priorities.sum()
+
+        # Sample indices based on probabilities
+        sampled_indices = self.rng.choice(len(self.buffer), size=len(indices), p=probabilities)
+        batch = [self.buffer[i] for i in sampled_indices]
         # Stack the numpy arrays and convert to tensors once
         actions = torch.as_tensor(
             np.array([item[1] for item in batch]),
@@ -108,14 +118,16 @@ class ExperienceBuffer(object):
         """
         Function to return the experience buffer in shuffled batches.
         :param batch_size: size of each batch yielded by the generator.
-        :return:
+        :return: Generator yielding batches of experiences. Experiences are sampled with probabilities proportional to their priorities.
         """
         total_samples = len(self.buffer)
         if total_samples == 0:
             return
 
-        indices = np.arange(total_samples)
-        self.rng.shuffle(indices)
+        # Use prioritized sampling for indices
+        priorities = np.array([item[-1] for item in self.buffer], dtype=np.float32)
+        probabilities = priorities / priorities.sum()
+        indices = self.rng.choice(total_samples, size=total_samples, replace=False, p=probabilities)
 
         for start_idx in range(0, total_samples, batch_size):
             batch_indices = indices[start_idx : start_idx + batch_size]

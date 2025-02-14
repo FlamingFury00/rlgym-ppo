@@ -200,7 +200,7 @@ class BatchedAgentManager(object):
 
         inference_batch = np.concatenate(obs, axis=0)
         actions, log_probs = self.policy.get_action(inference_batch)
-        actions = actions.numpy().astype(np.float32)
+        actions = actions.numpy().astype(np.float16)  # Use float16 to reduce memory usage
 
         step = 0
         for proc_id, dim_0 in zip(pids, dimensions):
@@ -210,7 +210,12 @@ class BatchedAgentManager(object):
             state = inference_batch[step:stop]
             action = actions[step:stop]
             logp = log_probs[step:stop]
-            parent_end.sendto(self.packed_header + action.tobytes(), child_endpoint)
+            try:
+                # Combine header and action data into a single packet
+                packet = self.packed_header + action.tobytes()
+                parent_end.sendto(packet, child_endpoint)
+            except Exception as e:
+                print(f"[ERROR] Failed to send actions to process {proc_id}: {e}")
             self.trajectory_map[proc_id].action = action
             self.trajectory_map[proc_id].log_prob = logp
             self.trajectory_map[proc_id].state = state
@@ -243,9 +248,12 @@ class BatchedAgentManager(object):
 
                 parent_end, fd, events, proc_id = key
                 process, parent_end, child_endpoint, shm_view = self.processes[proc_id]
-                n_collected += self._collect_response(
-                    proc_id, parent_end, shm_view, collected_metrics, obs_mean, obs_std
-                )
+                try:
+                    n_collected += self._collect_response(
+                        proc_id, parent_end, shm_view, collected_metrics, obs_mean, obs_std
+                    )
+                except Exception as e:
+                    print(f"[ERROR] Failed to collect response from process {proc_id}: {e}")
                 # print(n_collected, "|", len(collected_metrics))
 
         return collected_metrics, n_collected
@@ -304,7 +312,7 @@ class BatchedAgentManager(object):
             self.shm_cache[proc_id] = (rews, metrics, obs)
 
         rews, metrics, next_observation = self.shm_cache[proc_id]
-        next_observation = next_observation.copy()
+        next_observation = next_observation.astype(np.float16).copy()  # Use float16 for reduced memory usage
         collected_metrics.append(metrics.copy())
 
         if self.standardize_obs:
@@ -341,7 +349,7 @@ class BatchedAgentManager(object):
         if proc_id not in self.current_pids:
             self.current_pids.append(proc_id)
 
-        self.next_obs[proc_id] = next_observation
+        self.next_obs[proc_id] = next_observation.astype(np.float32)  # Convert back to float32 if needed
         self.trajectory_map[proc_id].reward = [arg for arg in rews]
         self.trajectory_map[proc_id].next_state = next_observation
         self.trajectory_map[proc_id].done = done
@@ -377,14 +385,14 @@ class BatchedAgentManager(object):
                 if n_elements_in_state_shape == 1:
                     shape = [1, shape[0]]
 
-                obs = np.reshape(data[1 + n_elements_in_state_shape :], shape)
+                obs = np.reshape(data[1 + n_elements_in_state_shape :], shape).astype(np.float16)  # Use float16
                 if self.standardize_obs:
                     if self.obs_stats is None:
                         self.obs_stats = WelfordRunningStat(shape=shape[-1])
                     self.obs_stats.increment(obs, shape[0])
 
                 # self.current_obs.append(obs)
-                self.current_obs[proc_id] = obs
+                self.current_obs[proc_id] = obs.astype(np.float32)  # Convert back to float32 if needed
 
     def _get_env_shapes(self):
         """
@@ -453,6 +461,7 @@ class BatchedAgentManager(object):
 
         # Spawn child processes
         for proc_id in tqdm(range(n_processes)):
+            print(f"[INFO] Initializing process {proc_id}...")
             render_this_proc = proc_id == 0 and render
 
             # Create socket to communicate with child
@@ -474,7 +483,11 @@ class BatchedAgentManager(object):
                     render_delay,
                 ),
             )
-            process.start()
+            try:
+                process.start()
+                print(f"[INFO] Process {proc_id} started successfully.")
+            except Exception as e:
+                print(f"[ERROR] Failed to start process {proc_id}: {e}")
 
             shm_view = frombuffer(
                 buffer=self.shm_buffer,
@@ -520,7 +533,7 @@ class BatchedAgentManager(object):
                     child_endpoint,
                 )
             except Exception:
-                print("Unable to join process")
+                print(f"[ERROR] Unable to join process {proc_id}")
                 traceback.print_exc()
                 print("Failed to send stop signal to child process!")
                 traceback.print_exc()
@@ -528,11 +541,11 @@ class BatchedAgentManager(object):
             try:
                 process.join()
             except Exception:
-                print("Unable to join process")
+                print(f"[ERROR] Unable to join process {proc_id}")
                 traceback.print_exc()
 
             try:
                 parent_end.close()
             except Exception:
-                print("Unable to close parent connection")
+                print(f"[ERROR] Unable to close parent connection for process {proc_id}")
                 traceback.print_exc()
