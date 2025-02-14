@@ -31,6 +31,8 @@ class Config:
     PPO_MINIBATCH_SIZE: Union[int, None] = None  # Minibatch size for PPO updates (defaults to batch size).
     PPO_ENT_COEF: float = 0.005  # Entropy coefficient to encourage exploration.
     PPO_CLIP_RANGE: float = 0.2  # Clipping range for PPO updates.
+    PPO_MAX_GRAD_NORM: float = 0.5  # Maximum gradient norm for clipping.
+    PPO_KL_TARGET: float = 0.01  # Target KL divergence for policy updates.
 
     # Learning Rates
     POLICY_LR: float = 3e-4  # Learning rate for the policy network.
@@ -55,6 +57,8 @@ class Config:
 
     # Logging and Checkpointing
     LOG_TO_WANDB: bool = True  # Whether to log metrics to Weights & Biases.
+    WANDB_PROJECT_NAME: str = "rlgym-ppo"  # Default project name for Weights & Biases.
+    WANDB_GROUP_NAME: str = "default-group"  # Default group name for Weights & Biases runs.
     CHECKPOINTS_SAVE_FOLDER: Union[str, None] = "data/checkpoints/rlgym-ppo-run"  # Folder to save checkpoints.
     N_CHECKPOINTS_TO_KEEP: int = 5  # Number of checkpoints to keep.
     ADD_UNIX_TIMESTAMP: bool = True  # Whether to add a timestamp to the checkpoint folder name.
@@ -68,6 +72,7 @@ class Config:
     STANDARDIZE_OBS: bool = True  # Whether to normalize observations.
     MAX_RETURNS_PER_STATS_INCREMENT: int = 150  # Maximum returns to use for stats updates.
     STEPS_PER_OBS_STATS_INCREMENT: int = 5  # Steps between observation stats updates.
+    RANDOM_ACTION_PROB: float = 0.0  # Probability of taking a random action (for exploration).
 
     @classmethod
     def update(cls, **kwargs):

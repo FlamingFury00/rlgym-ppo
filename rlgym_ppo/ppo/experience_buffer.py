@@ -1,14 +1,3 @@
-"""
-File: experience_buffer.py
-Author: Matthew Allen
-
-Description:
-    A buffer containing the experience to be learned from on this iteration. The buffer may be added to, removed from,
-    and shuffled. When the maximum specified size of the buffer is exceeded, the least recent entries will be removed in
-    a FIFO fashion. The buffer supports prioritized experience replay, where experiences are sampled with probabilities
-    proportional to their priorities (based on advantage magnitude).
-"""
-
 from collections import deque
 
 import numpy as np
@@ -86,6 +75,7 @@ class ExperienceBuffer(object):
         # Sample indices based on probabilities
         sampled_indices = self.rng.choice(len(self.buffer), size=len(indices), p=probabilities)
         batch = [self.buffer[i] for i in sampled_indices]
+
         # Stack the numpy arrays and convert to tensors once
         actions = torch.as_tensor(
             np.array([item[1] for item in batch]),
@@ -138,4 +128,4 @@ class ExperienceBuffer(object):
         Function to clear the experience buffer.
         :return: None.
         """
-        self.buffer.clear()
+        self.buffer.clear

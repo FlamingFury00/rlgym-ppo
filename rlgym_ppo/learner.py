@@ -221,6 +221,89 @@ class Learner(object):
 
         :return: None
         """
+        kb = KBHit()
+        print("Press (p) to pause, (c) to checkpoint, (q) to checkpoint and quit (after next iteration)\\n")
+
+        while self.agent.cumulative_timesteps < self.timestep_limit:
+            try:
+                epoch_start = time.perf_counter()
+                report = {}
+
+                # Collect timesteps
+                experience, collected_metrics, steps_collected, collection_time = self.agent.collect_timesteps(self.ts_per_epoch)
+
+                # Report metrics if logger is provided
+                if self.metrics_logger is not None:
+                    self.metrics_logger.report_metrics(
+                        collected_metrics, self.wandb_run, self.agent.cumulative_timesteps
+                    )
+
+                # Add new experience to the buffer
+                add_exp_start_time = time.perf_counter()
+                self.add_new_experience(experience)
+                add_exp_time = time.perf_counter() - add_exp_start_time
+
+                # Perform PPO updates
+                ppo_start_time = time.perf_counter()
+                ppo_report = self.ppo_learner.learn(self.experience_buffer)
+                ppo_time = time.perf_counter() - ppo_start_time
+
+                # Calculate epoch time
+                epoch_stop = time.perf_counter()
+                epoch_time = epoch_stop - epoch_start
+
+                # Update report with metrics
+                report.update(ppo_report)
+                report["Cumulative Timesteps"] = self.agent.cumulative_timesteps
+                report["Total Iteration Time"] = epoch_time
+                report["Timesteps Collected"] = steps_collected
+                report["Timestep Collection Time"] = collection_time
+                report["Experience Processing Time"] = add_exp_time
+                report["PPO Learning Time"] = ppo_time
+                report["Timestep Consumption Time"] = epoch_time - collection_time - add_exp_time
+                report["Collected Steps per Second"] = steps_collected / collection_time
+                report["Overall Steps per Second"] = steps_collected / epoch_time
+
+                self.ts_since_last_save += steps_collected
+                report["Policy Reward"] = self.agent.average_reward if self.agent.average_reward is not None else np.nan
+
+                # Log metrics
+                reporting.report_metrics(loggable_metrics=report, debug_metrics=None, wandb_run=self.wandb_run)
+
+                # Clear temporary reports
+                report.clear()
+                ppo_report.clear()
+
+                # Free GPU memory if applicable
+                if "cuda" in self.device:
+                    torch.cuda.empty_cache()
+
+                # Handle keyboard input
+                if kb.kbhit():
+                    c = kb.getch()
+                    if c == "p":
+                        print("Paused, press any key to resume")
+                        while True:
+                            if kb.kbhit():
+                                break
+                    if c in ("c", "q"):
+                        self.save(self.agent.cumulative_timesteps)
+                    if c == "q":
+                        return
+                    if c in ("c", "p"):
+                        print("Resuming...\\n")
+
+                # Save checkpoint if necessary
+                if self.ts_since_last_save >= self.save_every_ts:
+                    self.save(self.agent.cumulative_timesteps)
+                    self.ts_since_last_save = 0
+
+                self.epoch += 1
+
+            except Exception as e:
+                print(f"Error during learning loop: {e}")
+                self.save(self.agent.cumulative_timesteps)
+                break
 
     def update_learning_rate(self, new_policy_lr: Union[float, None] = None, new_critic_lr: Union[float, None] = None) -> bool:
         """
