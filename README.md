@@ -59,7 +59,7 @@ learner.learn()
 ```
 
 For more examples, refer to the [`example.py`](example.py) file.
-```
+
 Note:
 - Users must implement a function to configure Rocket League (or RocketSim) in RLGym that returns an RLGym environment. See the [`example.py`](example.py) file for an example.
 
