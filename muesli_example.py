@@ -296,7 +296,7 @@ def build_rocketsim_env():
     timeout_seconds = 10
     timeout_ticks = int(round(timeout_seconds * game_tick_rate / tick_skip))
 
-    action_parser = LookupAction()
+    action_parser = ContinuousAction()
     terminal_conditions = [
         NoTouchTimeoutCondition(timeout_ticks),
         GoalScoredCondition(),
