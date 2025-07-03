@@ -11,7 +11,6 @@ Description:
 
 """
 
-
 import torch
 import torch.nn as nn
 from torch.distributions import Normal
@@ -21,13 +20,19 @@ from rlgym_ppo.util import torch_functions
 
 
 class ContinuousPolicy(nn.Module):
-    def __init__(self, input_shape, output_shape, layer_sizes, device, var_min=0.1, var_max=1.0):
+    def __init__(
+        self, input_shape, output_shape, layer_sizes, device, var_min=0.1, var_max=1.0
+    ):
         super().__init__()
         self.device = device
-        self.affine_map = torch_functions.MapContinuousToAction(range_min=var_min, range_max=var_max)
+        self.affine_map = torch_functions.MapContinuousToAction(
+            range_min=var_min, range_max=var_max
+        )
 
         # Build the neural network.
-        assert len(layer_sizes) != 0, "AT LEAST ONE LAYER MUST BE SPECIFIED TO BUILD THE NEURAL NETWORK!"
+        assert (
+            len(layer_sizes) != 0
+        ), "AT LEAST ONE LAYER MUST BE SPECIFIED TO BUILD THE NEURAL NETWORK!"
         layers = [nn.Linear(input_shape, layer_sizes[0]), nn.ReLU()]
 
         prev_size = layer_sizes[0]

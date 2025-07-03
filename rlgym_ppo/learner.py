@@ -18,10 +18,11 @@ from typing import Tuple, Union
 import numpy as np
 import torch
 import wandb
-from wandb.sdk.wandb_run import Run  # Corrected import
+from wandb.sdk.wandb_run import Run
 
 from rlgym_ppo.batched_agents import BatchedAgentManager
 from rlgym_ppo.ppo import ExperienceBuffer, PPOLearner
+from rlgym_ppo.muesli import MuesliLearner
 from rlgym_ppo.util import KBHit, WelfordRunningStat, reporting, torch_functions
 
 
@@ -58,6 +59,20 @@ class Learner(object):
             gae_gamma: float = 0.99,
             policy_lr: float = 3e-4,
             critic_lr: float = 3e-4,
+
+            # Muesli-specific parameters
+            use_muesli: bool = False,
+            model_lr: float = 3e-4,
+            model_layer_sizes: Tuple[int, ...] = (256, 256),
+            hidden_state_size: int = 256,
+            n_step_unroll: int = 5,
+            target_update_rate: float = 0.005,
+            model_loss_weight: float = 1.0,
+            reward_loss_weight: float = 1.0,
+            conservative_weight: float = 1.0,
+            reanalysis_ratio: float = 0.5,
+            use_categorical_value: bool = False,
+            use_categorical_reward: bool = False,
 
             log_to_wandb: bool = False,
             load_wandb: bool = True,
@@ -99,6 +114,10 @@ class Learner(object):
         self.checkpoints_save_folder = checkpoints_save_folder
         self.max_returns_per_stats_increment = max_returns_per_stats_increment
         self.metrics_logger = metrics_logger
+
+        # Configure sequential learning if available (will be checked after agent initialization)
+        self._check_sequential_learning_config = True
+
         self.standardize_returns = standardize_returns
         self.save_every_ts = save_every_ts
         self.ts_since_last_save = 0
@@ -120,18 +139,39 @@ class Learner(object):
         self.gae_gamma = gae_gamma
         self.return_stats = WelfordRunningStat(1)
         self.epoch = 0
+        self.use_muesli = use_muesli
 
-        # Initialize ExperienceBuffer directly on the target device if possible
-        self.experience_buffer = ExperienceBuffer(
-            self.exp_buffer_size, seed=random_seed, device=self.device
-        )
+        # Initialize ExperienceBuffer directly on the target device
+        if self.use_muesli:
+            from rlgym_ppo.muesli.muesli_experience_buffer import MuesliExperienceBuffer
+
+            # Enable optimized sequential learning for multi-step (memory-efficient)
+            enable_sequential = (
+                n_step_unroll > 1
+            )  # Auto-enable if multi-step is requested
+
+            self.experience_buffer = MuesliExperienceBuffer(
+                self.exp_buffer_size,
+                seed=random_seed,
+                device=self.device,
+                sequence_length=n_step_unroll,
+                enable_sequential=enable_sequential,
+            )
+        else:
+            self.experience_buffer = ExperienceBuffer(
+                self.exp_buffer_size, seed=random_seed, device=self.device
+            )
 
         print("Initializing processes...")
         collect_metrics_fn = (
-            None if metrics_logger is None else self.metrics_logger.collect_metrics
+            None
+            if metrics_logger is None
+            else getattr(self.metrics_logger, "collect_metrics", None)
         )
+
+        # Initialize agent manager without policy first
         self.agent = BatchedAgentManager(
-            None,
+            None,  # Will be set after learner initialization
             min_inference_size=min_inference_size,
             seed=random_seed,
             standardize_obs=standardize_obs,
@@ -147,28 +187,63 @@ class Learner(object):
             shm_buffer_size=shm_buffer_size,
         )
         obs_space_size = np.prod(obs_space_size)
-        print("Initializing PPO...")
+
         if ppo_minibatch_size is None:
             ppo_minibatch_size = ppo_batch_size
 
-        self.ppo_learner = PPOLearner(
-            obs_space_size,
-            act_space_size,
-            device=self.device,
-            batch_size=ppo_batch_size,
-            mini_batch_size=ppo_minibatch_size,
-            n_epochs=ppo_epochs,
-            continuous_var_range=continuous_var_range,
-            policy_type=action_space_type,
-            policy_layer_sizes=policy_layer_sizes,
-            critic_layer_sizes=critic_layer_sizes,
-            policy_lr=policy_lr,
-            critic_lr=critic_lr,
-            clip_range=ppo_clip_range,
-            ent_coef=ppo_ent_coef,
-        )
+        if use_muesli:
+            print("Initializing Muesli...")
+            self.learner = MuesliLearner(
+                obs_space_size,
+                act_space_size,
+                action_space_type,
+                policy_layer_sizes,
+                critic_layer_sizes,
+                model_layer_sizes,
+                continuous_var_range,
+                ppo_batch_size,
+                ppo_epochs,
+                policy_lr,
+                critic_lr,
+                model_lr,
+                ppo_clip_range,
+                ppo_ent_coef,
+                ppo_minibatch_size,
+                self.device,
+                hidden_state_size=hidden_state_size,
+                n_step_unroll=n_step_unroll,
+                target_update_rate=target_update_rate,
+                model_loss_weight=model_loss_weight,
+                reward_loss_weight=reward_loss_weight,
+                conservative_weight=conservative_weight,
+                reanalysis_ratio=reanalysis_ratio,
+                use_categorical_value=use_categorical_value,
+                use_categorical_reward=use_categorical_reward,
+            )
+        else:
+            print("Initializing PPO...")
+            self.learner = PPOLearner(
+                obs_space_size,
+                act_space_size,
+                device=self.device,
+                batch_size=ppo_batch_size,
+                mini_batch_size=ppo_minibatch_size,
+                n_epochs=ppo_epochs,
+                continuous_var_range=continuous_var_range,
+                policy_type=action_space_type,
+                policy_layer_sizes=policy_layer_sizes,
+                critic_layer_sizes=critic_layer_sizes,
+                policy_lr=policy_lr,
+                critic_lr=critic_lr,
+                clip_range=ppo_clip_range,
+                ent_coef=ppo_ent_coef,
+            )
 
-        self.agent.policy = self.ppo_learner.policy
+        # For backward compatibility, keep ppo_learner attribute
+        self.ppo_learner = self.learner
+
+        # Set policy for agent manager - suppress type warning as this is intentional
+        self.agent.policy = self.learner.policy  # type: ignore
 
         self.config = {
             "n_proc": n_proc,
@@ -190,6 +265,16 @@ class Learner(object):
             "policy_lr": policy_lr,
             "critic_lr": critic_lr,
             "shm_buffer_size": shm_buffer_size,
+            "use_muesli": use_muesli,
+            "model_lr": model_lr if use_muesli else None,
+            "model_layer_sizes": model_layer_sizes if use_muesli else None,
+            "hidden_state_size": hidden_state_size if use_muesli else None,
+            "n_step_unroll": n_step_unroll if use_muesli else None,
+            "target_update_rate": target_update_rate if use_muesli else None,
+            "model_loss_weight": model_loss_weight if use_muesli else None,
+            "reward_loss_weight": reward_loss_weight if use_muesli else None,
+            "conservative_weight": conservative_weight if use_muesli else None,
+            "reanalysis_ratio": reanalysis_ratio if use_muesli else None,
         }
 
         self.wandb_run = wandb_run
@@ -225,15 +310,17 @@ class Learner(object):
             print(f"New policy learning rate: {new_policy_lr}")
             updated = True
 
-        if (
-            new_critic_lr is not None
-            and self.ppo_learner.value_optimizer.param_groups[0]["lr"] != new_critic_lr
-        ):
-            self.critic_lr = new_critic_lr
-            for param_group in self.ppo_learner.value_optimizer.param_groups:
-                param_group["lr"] = new_critic_lr
-            print(f"New critic learning rate: {new_critic_lr}")
-            updated = True
+        if new_critic_lr is not None and hasattr(self.ppo_learner, "value_optimizer"):
+            value_optimizer = getattr(self.ppo_learner, "value_optimizer", None)
+            if (
+                value_optimizer
+                and value_optimizer.param_groups[0]["lr"] != new_critic_lr
+            ):
+                self.critic_lr = new_critic_lr
+                for param_group in value_optimizer.param_groups:
+                    param_group["lr"] = new_critic_lr
+                print(f"New critic learning rate: {new_critic_lr}")
+                updated = True
 
         return updated
 
@@ -271,6 +358,14 @@ class Learner(object):
         )
 
         while self.agent.cumulative_timesteps < self.timestep_limit:
+            # Configure sequential learning on first iteration if needed
+            if (
+                hasattr(self, "_check_sequential_learning_config")
+                and self._check_sequential_learning_config
+            ):
+                self._configure_sequential_learning()
+                self._check_sequential_learning_config = False
+
             epoch_start = time.perf_counter()
             report = {}
 
@@ -350,68 +445,97 @@ class Learner(object):
     @torch.no_grad()
     def add_new_experience(self, experience):
         states, actions, log_probs, rewards, next_states, dones, truncated = experience
-        value_net = self.ppo_learner.value_net
 
-        # Move data to the target device once here
-        states_tensor = torch.as_tensor(states, dtype=torch.float32, device=self.device)
-        next_states_tensor = torch.as_tensor(
-            next_states, dtype=torch.float32, device=self.device
-        )
-        rewards_tensor = torch.as_tensor(
-            rewards, dtype=torch.float32, device=self.device
-        )
-        dones_tensor = torch.as_tensor(dones, dtype=torch.float32, device=self.device)
-        truncated_tensor = torch.as_tensor(
-            truncated, dtype=torch.float32, device=self.device
-        )
+        # Handle value network for different learner types
+        if self.use_muesli:
+            # For Muesli, we need to use the full pipeline: obs -> hidden_state -> value
+            policy = getattr(self.ppo_learner, "policy", None)
+            if (
+                policy
+                and hasattr(policy, "get_hidden_state")
+                and hasattr(policy, "value_head")
+            ):
 
-        # Construct input for value function estimator
-        if next_states_tensor.numel() > 0:
-            val_inp = torch.cat(
-                (states_tensor, next_states_tensor[-1].unsqueeze(0)), dim=0
-            )
+                def muesli_value_wrapper(x):
+                    hidden_state = policy.get_hidden_state(x)
+                    return policy.value_head(hidden_state)
+
+                value_net = muesli_value_wrapper
+            else:
+                # Fallback to direct value_net if available
+                value_net = getattr(self.ppo_learner, "value_net", None)
         else:
-            val_inp = states_tensor  # Use only states if next_states is empty
+            # For PPO, use the standard value_net
+            value_net = getattr(self.ppo_learner, "value_net", None)
 
-        # Predict expected returns
-        val_preds = value_net(val_inp).flatten()
+        if value_net is None:
+            # Fallback: create dummy values if we can't find value network
+            val_preds = torch.zeros(len(states), device=self.device)
+        else:
+            # Move data to the target device once here
+            states_tensor = torch.as_tensor(
+                states, dtype=torch.float32, device=self.device
+            )
+            next_states_tensor = torch.as_tensor(
+                next_states, dtype=torch.float32, device=self.device
+            )
+            rewards_tensor = torch.as_tensor(
+                rewards, dtype=torch.float32, device=self.device
+            )
+            dones_tensor = torch.as_tensor(
+                dones, dtype=torch.float32, device=self.device
+            )
+            truncated_tensor = torch.as_tensor(
+                truncated, dtype=torch.float32, device=self.device
+            )
 
-        # Compute GAE
-        ret_std = self.return_stats.std[0] if self.standardize_returns else None
-        value_targets, advantages, returns = torch_functions.compute_gae(
-            rewards_tensor.cpu().numpy().tolist(),
-            dones_tensor.cpu().numpy().tolist(),
-            truncated_tensor.cpu().numpy().tolist(),
-            val_preds.cpu()
-            .numpy()
-            .tolist(),  # Compute GAE on CPU for now, can optimize later
-            gamma=self.gae_gamma,
-            lmbda=self.gae_lambda,
-            return_std=ret_std,
-        )
-        value_targets = torch.as_tensor(
-            value_targets, dtype=torch.float32, device=self.device
-        )
-        advantages = torch.as_tensor(
-            advantages, dtype=torch.float32, device=self.device
-        )
+            # Construct input for value function estimator
+            if next_states_tensor.numel() > 0:
+                val_inp = torch.cat(
+                    (states_tensor, next_states_tensor[-1].unsqueeze(0)), dim=0
+                )
+            else:
+                val_inp = states_tensor  # Use only states if next_states is empty
 
-        if self.standardize_returns:
-            n_to_increment = min(self.max_returns_per_stats_increment, len(returns))
-            self.return_stats.increment(returns[:n_to_increment], n_to_increment)
+            # Predict expected returns
+            val_preds = value_net(val_inp).flatten()
 
-        # Submit experience to the buffer
-        self.experience_buffer.submit_experience(
-            states,
-            actions,
-            log_probs,
-            rewards,
-            next_states,
-            dones,
-            truncated,
-            value_targets.cpu().numpy(),  # Keep in numpy for buffer (optimized in prev step)
-            advantages.cpu().numpy(),
-        )
+            # Compute GAE
+            ret_std = self.return_stats.std[0] if self.standardize_returns else None
+            value_targets, advantages, returns = torch_functions.compute_gae(
+                rewards_tensor.cpu().numpy().tolist(),
+                dones_tensor.cpu().numpy().tolist(),
+                truncated_tensor.cpu().numpy().tolist(),
+                val_preds.cpu()
+                .numpy()
+                .tolist(),  # Compute GAE on CPU for now, can optimize later
+                gamma=self.gae_gamma,
+                lmbda=self.gae_lambda,
+                return_std=ret_std,
+            )
+            value_targets = torch.as_tensor(
+                value_targets, dtype=torch.float32, device=self.device
+            )
+            advantages = torch.as_tensor(
+                advantages, dtype=torch.float32, device=self.device
+            )
+
+            if self.standardize_returns:
+                n_to_increment = min(self.max_returns_per_stats_increment, len(returns))
+                self.return_stats.increment(returns[:n_to_increment], n_to_increment)
+
+            # Submit experience to the buffer
+            self.experience_buffer.submit_experience(
+                states,
+                actions,
+                log_probs,
+                rewards,
+                next_states,
+                dones,
+                truncated,
+                value_targets.cpu().numpy(),  # Keep in numpy for buffer (optimized in prev step)
+                advantages.cpu().numpy(),
+            )
 
     def save(self, cumulative_timesteps):
         """
@@ -453,7 +577,11 @@ class Learner(object):
             "ts_since_last_save": self.ts_since_last_save,
             "reward_running_stats": self.return_stats.to_json(),
         }
-        if self.agent.standardize_obs:
+        if (
+            self.agent.standardize_obs
+            and hasattr(self.agent, "obs_stats")
+            and self.agent.obs_stats
+        ):
             book_keeping_vars["obs_running_stats"] = self.agent.obs_stats.to_json()
         if self.standardize_returns:
             book_keeping_vars["reward_running_stats"] = self.return_stats.to_json()
@@ -533,6 +661,36 @@ class Learner(object):
 
         print("Checkpoint loaded!")
         return wandb_loaded
+
+    def _configure_sequential_learning(self):
+        """
+        Configure sequential learning if available.
+        Called after agent initialization to properly set up multi-step learning.
+        """
+        if hasattr(self.experience_buffer, "sequential_data_enabled"):
+            if getattr(self.experience_buffer, "sequential_data_enabled", False):
+                # Try to access the Muesli learner through different paths
+                muesli_learner = None
+
+                # Check if agent has policy attribute (BatchedAgentManager)
+                if hasattr(self.agent, "policy") and self.agent.policy is not None:
+                    muesli_learner = self.agent.policy
+                # Check if agent is the learner directly
+                elif hasattr(self.agent, "sequential_learning_active"):
+                    muesli_learner = self.agent
+
+                if muesli_learner and hasattr(
+                    muesli_learner, "sequential_learning_active"
+                ):
+                    setattr(muesli_learner, "sequential_learning_active", True)
+                    n_step = getattr(muesli_learner, "n_step_unroll", "unknown")
+                    print(f"Sequential multi-step learning enabled with {n_step} steps")
+                else:
+                    print(
+                        "Sequential data enabled but agent doesn't support sequential learning"
+                    )
+            else:
+                print("Sequential learning disabled - using single-step model rollout")
 
     def cleanup(self):
         """

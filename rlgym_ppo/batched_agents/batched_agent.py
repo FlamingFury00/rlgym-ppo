@@ -201,8 +201,11 @@ def batched_agent_process(
 
                         target_delay = render_delay / get_game_speed()
                         render_time_compensation = np.clip(
-                            render_time_compensation + (target_delay - render_delta_time),
-                            -target_delay, 0)
+                            render_time_compensation
+                            + (target_delay - render_delta_time),
+                            -target_delay,
+                            0,
+                        )
                         sleep_delay = max(0, target_delay + render_time_compensation)
                         time.sleep(sleep_delay)
 

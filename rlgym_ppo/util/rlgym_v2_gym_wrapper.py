@@ -7,7 +7,9 @@ class RLGymV2GymWrapper(object):
         self.rlgym_env = rlgym_env
         self.agent_map = {}
         self.obs_buffer = np.zeros(1)
-        print('WARNING: CALLING ENV.RESET() ONE EXTRA TIME TO DETERMINE STATE AND ACTION SPACES')
+        print(
+            "WARNING: CALLING ENV.RESET() ONE EXTRA TIME TO DETERMINE STATE AND ACTION SPACES"
+        )
         obs_dict = rlgym_env.reset()
         obs_list = list(obs_dict.values())
         act_space = list(rlgym_env.action_spaces.values())[0][1]
@@ -21,10 +23,14 @@ class RLGymV2GymWrapper(object):
             self.action_space = None
 
         if type(obs_space) == int and obs_space > 0:
-            self.observation_space = gym.spaces.Box(low=-np.inf, high=np.inf, shape=(obs_space, ))
+            self.observation_space = gym.spaces.Box(
+                low=-np.inf, high=np.inf, shape=(obs_space,)
+            )
         else:
             if obs_list:
-                self.observation_space = gym.spaces.Box(low=-np.inf, high=np.inf, shape=np.shape(obs_list[0]))
+                self.observation_space = gym.spaces.Box(
+                    low=-np.inf, high=np.inf, shape=np.shape(obs_list[0])
+                )
             else:
                 self.observation_space = None
 
@@ -52,7 +58,9 @@ class RLGymV2GymWrapper(object):
             action = actions[i]
             action_dict[agent_id] = action
 
-        obs_dict, reward_dict, terminated_dict, truncated_dict = self.rlgym_env.step(action_dict)
+        obs_dict, reward_dict, terminated_dict, truncated_dict = self.rlgym_env.step(
+            action_dict
+        )
 
         rews = []
         done = False

@@ -7,6 +7,7 @@ try:
 except ImportError:
     GameState = object
 
+
 class MetricsLogger(ABC):
     def collect_metrics(self, game_state: GameState) -> np.ndarray:
         metrics_arrays = self._collect_metrics(game_state)
@@ -32,13 +33,15 @@ class MetricsLogger(ABC):
                 n_values_in_metric = 1
                 shape = []
                 i += 1
-                for arg in serialized_metrics[i:i+n_shape]:
+                for arg in serialized_metrics[i : i + n_shape]:
                     n_values_in_metric *= arg
                     shape.append(int(arg))
                 n_values_in_metric = int(n_values_in_metric)
-                metric = serialized_metrics[i+n_shape:i+n_shape+n_values_in_metric]
+                metric = serialized_metrics[
+                    i + n_shape : i + n_shape + n_values_in_metric
+                ]
                 metrics_arrays.append(metric)
-                i = i+n_shape+n_values_in_metric
+                i = i + n_shape + n_values_in_metric
             all_reports.append(metrics_arrays)
 
         self._report_metrics(all_reports, wandb_run, cumulative_timesteps)
