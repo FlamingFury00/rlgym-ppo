@@ -43,9 +43,10 @@ class ObservationStacker:
         Returns:
             np.ndarray: Stacked observations
         """
-        # Roll stack and add new observation
-        self.stacked_obs = np.roll(self.stacked_obs, -1, axis=0)
-        self.stacked_obs[-1] = obs
+        # Shift older observations
+        self.stacked_obs[1:] = self.stacked_obs[:-1]
+        # Add newest observation at the beginning
+        self.stacked_obs[0] = obs
 
         # Return flattened stacked observations
         return self.stacked_obs.flatten()
@@ -764,10 +765,9 @@ class MuesliPolicy(nn.Module):
             torch.Tensor: Conservative regularization loss
         """
 
-        with torch.no_grad():
-            if self.policy_type == 0:  # Discrete actions
-                logits = self.policy_head(hidden_states)
-                probs = self.softmax(logits)
+        if self.policy_type == 0:  # Discrete actions
+            logits = self.policy_head(hidden_states)
+            probs = self.softmax(logits)
                 probs = torch.clamp(probs, min=1e-11, max=1)
 
                 # Use efficient entropy computation
