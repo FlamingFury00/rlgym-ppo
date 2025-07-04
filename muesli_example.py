@@ -42,9 +42,12 @@ class ObservationStacker:
     def reset(self, initial_obs):
         """Reset with initial observation repeated across all frames for smooth start."""
         if initial_obs is not None:
-            self.stacked_obs.fill(0)
+            # Fill stack with initial observation
             for i in range(self.stack_size):
                 self.stacked_obs[i] = initial_obs
+        else:
+            # Clear stack
+            self.stacked_obs.fill(0.0)
 
     def add_observation(self, obs):
         """Add new observation and return flattened stacked observations."""

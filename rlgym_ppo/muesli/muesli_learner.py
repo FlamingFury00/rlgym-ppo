@@ -53,7 +53,6 @@ class MuesliLearner:
         model_loss_weight=1.0,
         reward_loss_weight=1.0,
         conservative_weight=1.0,
-        reanalysis_ratio=0.5,
         use_categorical_value=False,
         use_categorical_reward=False,
     ):
@@ -83,7 +82,6 @@ class MuesliLearner:
             model_loss_weight (float): Weight for model loss
             reward_loss_weight (float): Weight for reward loss
             conservative_weight (float): Weight for conservative policy updates
-            reanalysis_ratio (float): Ratio of reanalyzed experiences
             use_categorical_value (bool): Use categorical value representation
             use_categorical_reward (bool): Use categorical reward representation
         """
@@ -130,13 +128,6 @@ class MuesliLearner:
             tau=target_update_rate, device=device
         )
         self._setup_target_networks()
-
-        # Initialize experience reanalyzer
-        self.experience_reanalyzer = ExperienceReanalyzer(
-            reanalysis_ratio=reanalysis_ratio,
-            n_step_unroll=n_step_unroll,
-            device=device,
-        )
 
         # Initialize target value estimator
         self.target_value_estimator = TargetValueEstimator(self.target_manager)
@@ -373,7 +364,6 @@ class MuesliLearner:
             "policy_update_magnitude": policy_update_magnitude,
             "value_update_magnitude": value_update_magnitude,
             "target_network_tau": self.target_manager.tau,
-            "reanalysis_stats": self.experience_reanalyzer.get_statistics(),
             # Muesli configuration metrics
             "model_loss_weight": self.model_loss_weight,
             "reward_loss_weight": self.reward_loss_weight,
@@ -622,20 +612,13 @@ class MuesliLearner:
         # Get initial hidden states from current policy representation
         current_hidden_states = self.policy.get_hidden_state(states)
 
-        # For multi-step unrolling - enable when sequential data is available
-        if hasattr(self, "sequential_learning_active") and getattr(
-            self, "sequential_learning_active", False
-        ):
-            # Use full multi-step when sequential data is available
-            max_steps = min(
-                self.n_step_unroll, 3
-            )  # Use up to 3 steps for sequential learning
-        else:
-            # Use single step for regular model rollout learning
-            max_steps = 1
+        # This function is called for individual transitions (or the first step of a sequence).
+        # For model learning from these, we perform a 1-step prediction.
+        # Multi-step model learning from true sequences is handled by _compute_sequential_model_losses.
+        max_steps = 1
 
-        # Note: Sequential data provides true environment transitions
-        # Model rollout provides simulated transitions using learned dynamics
+        # Note: Sequential data provides true environment transitions which are handled elsewhere.
+        # This method focuses on learning from individual s,a,r,s' samples.
 
         for step in range(max_steps):
             # For single-step case, use the entire action vector
