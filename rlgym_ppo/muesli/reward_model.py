@@ -49,6 +49,9 @@ class RewardModel(nn.Module):
         self.reward_range = reward_range
         self.num_atoms = num_atoms
 
+        # Declare tensor attributes for type checking
+        self.reward_support: torch.Tensor
+
         # Input is concatenation of hidden state and action
         input_size = hidden_state_size + action_size
 
@@ -80,9 +83,8 @@ class RewardModel(nn.Module):
     def _setup_categorical_support(self):
         """Setup support for categorical reward representation."""
         min_reward, max_reward = self.reward_range
-        self.register_buffer(
-            "reward_support", torch.linspace(min_reward, max_reward, self.num_atoms)
-        )
+        support_tensor = torch.linspace(min_reward, max_reward, self.num_atoms)
+        self.register_buffer("reward_support", support_tensor)
 
     def _initialize_weights(self):
         """Initialize network weights using Xavier initialization."""
@@ -220,6 +222,9 @@ class CombinedPredictionHead(nn.Module):
         self.categorical_value = categorical_value
         self.value_range = value_range
         self.num_atoms = num_atoms
+
+        # Declare tensor attributes for type checking
+        self.value_support: torch.Tensor
 
         # Shared layers
         shared_layers = []

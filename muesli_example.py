@@ -17,7 +17,6 @@ CONFIGURATION GUIDE:
 
 import numpy as np
 from rlgym_sim.utils.gamestates import GameState
-from action_parser import LookupAction
 from rlgym_ppo.util import MetricsLogger
 
 
@@ -103,22 +102,12 @@ class StackedEnvironmentWrapper:
                 dtype=np.float32,
             )
         except ImportError:
-            try:
-                import gymnasium.spaces as spaces
+            # Create a simple object with shape attribute as fallback
+            class SimpleObsSpace:
+                def __init__(self, shape):
+                    self.shape = shape
 
-                self.observation_space = spaces.Box(
-                    low=-float("inf"),
-                    high=float("inf"),
-                    shape=(self.stacked_obs_size,),
-                    dtype=np.float32,
-                )
-            except ImportError:
-                # Create a simple object with shape attribute as fallback
-                class SimpleObsSpace:
-                    def __init__(self, shape):
-                        self.shape = shape
-
-                self.observation_space = SimpleObsSpace((self.stacked_obs_size,))
+            self.observation_space = SimpleObsSpace((self.stacked_obs_size,))
 
         if verbose:
             print("Observation Stacking Enabled:")
@@ -518,12 +507,10 @@ if __name__ == "__main__":
         #   Higher: More conservative updates, slower learning
         #   Lower: Faster learning, potentially less stable
         #   Range: 0.5 - 2.0
-        reanalysis_ratio=0.5,  # Fraction of reanalyzed experiences
+        reanalysis_ratio=0.5,  # Fraction of reanalyzed experiences (0.0 to disable)
         #   Higher: More sample efficiency, more computation
         #   Lower: Faster training, less sample efficiency
         #   Range: 0.2 - 0.8
-        reanalysis_ratio=0.5,  # Fraction of reanalyzed experiences (0.0 to disable)
-        replay_buffer_size_muesli=200000, # Size of replay buffer for Muesli reanalysis (if ratio > 0)
         # =============================================================================
         # TRAINING CONTROL SETTINGS
         # =============================================================================

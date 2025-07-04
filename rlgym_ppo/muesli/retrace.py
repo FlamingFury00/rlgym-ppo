@@ -169,7 +169,6 @@ class RetraceEstimator:
             dict: Policy gradient targets and related information
         """
         states = trajectory_data["states"]
-        actions = trajectory_data["actions"] # Historical actions
         batch_size, sequence_length = states.shape[:2]
 
         # Perform model-based rollouts for each timestep
@@ -177,14 +176,14 @@ class RetraceEstimator:
 
         with torch.no_grad():
             for t in range(sequence_length):
-                step_states = states[:, t] # s_t from real trajectory
+                step_states = states[:, t]  # s_t from real trajectory
 
                 # Get hidden state representation from current policy's representation network
                 current_hidden_state = policy_model.get_hidden_state(step_states)
 
                 # Perform n-step model rollout
                 discounted_return = torch.zeros(batch_size, device=states.device)
-                rollout_hidden_state = current_hidden_state # State for model rollout
+                rollout_hidden_state = current_hidden_state  # State for model rollout
                 discount = 1.0
 
                 for k in range(min(5, sequence_length - t)):  # 5-step lookahead
@@ -193,16 +192,24 @@ class RetraceEstimator:
                     # This might need adjustment based on MuesliPolicy's get_action output format
                     # For simplicity, let's assume it provides a suitable action tensor.
                     # Deterministic actions are often used in model rollouts for value estimation.
-                    rollout_action, _ = policy_model.get_action(rollout_hidden_state, deterministic=True)
+                    rollout_action, _ = policy_model.get_action(
+                        rollout_hidden_state, deterministic=True
+                    )
 
                     # Ensure rollout_action is on the correct device and has appropriate dimensions
                     rollout_action = rollout_action.to(states.device)
-                    if len(rollout_action.shape) == 1 and policy_model.policy_type != 0 : # Continuous or MultiDiscrete might need unsqueeze
-                        if policy_model.action_space_size > 1 or policy_model.policy_type == 2: # Cont or MultiDiscrete with >1 dim
-                             rollout_action = rollout_action.unsqueeze(-1)
-                    elif len(rollout_action.shape) == 0 and policy_model.policy_type == 0 : # Discrete action, needs to be (batch, 1)
-                         rollout_action = rollout_action.unsqueeze(-1)
-
+                    if (
+                        len(rollout_action.shape) == 1 and policy_model.policy_type != 0
+                    ):  # Continuous or MultiDiscrete might need unsqueeze
+                        if (
+                            policy_model.action_space_size > 1
+                            or policy_model.policy_type == 2
+                        ):  # Cont or MultiDiscrete with >1 dim
+                            rollout_action = rollout_action.unsqueeze(-1)
+                    elif (
+                        len(rollout_action.shape) == 0 and policy_model.policy_type == 0
+                    ):  # Discrete action, needs to be (batch, 1)
+                        rollout_action = rollout_action.unsqueeze(-1)
 
                     # Predict reward and next state
                     predicted_reward = reward_model(
@@ -222,15 +229,18 @@ class RetraceEstimator:
 
                     discounted_return += discount * reward_scalar
                     discount *= self.gamma
-                    rollout_hidden_state = next_rollout_hidden_state # Update state for next step of rollout
+                    rollout_hidden_state = next_rollout_hidden_state  # Update state for next step of rollout
 
                 # Add final bootstrap value from the value_model
-                final_value = value_model(rollout_hidden_state) # Value of the k-step rollout state
-                if hasattr(value_model, "categorical_value_to_scalar"): # Adapt if value model is categorical
+                final_value = value_model(
+                    rollout_hidden_state
+                )  # Value of the k-step rollout state
+                if hasattr(
+                    value_model, "categorical_value_to_scalar"
+                ):  # Adapt if value model is categorical
                     final_value = value_model.categorical_value_to_scalar(final_value)
-                elif len(final_value.shape) > 1 : # Ensure scalar value per batch item
+                elif len(final_value.shape) > 1:  # Ensure scalar value per batch item
                     final_value = final_value.squeeze(-1)
-
 
                 discounted_return += discount * final_value
                 model_based_returns.append(discounted_return)

@@ -8,7 +8,6 @@ try:
         DynamicsModel,
         RewardModel,
         TargetNetworkManager,
-        ExperienceReanalyzer,
         RetraceEstimator,
     )
 
@@ -19,7 +18,6 @@ try:
         "DynamicsModel",
         "RewardModel",
         "TargetNetworkManager",
-        "ExperienceReanalyzer",
         "RetraceEstimator",
     ]
 except ImportError:

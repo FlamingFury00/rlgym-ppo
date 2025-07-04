@@ -768,36 +768,36 @@ class MuesliPolicy(nn.Module):
         if self.policy_type == 0:  # Discrete actions
             logits = self.policy_head(hidden_states)
             probs = self.softmax(logits)
-                probs = torch.clamp(probs, min=1e-11, max=1)
+            probs = torch.clamp(probs, min=1e-11, max=1)
 
-                # Use efficient entropy computation
+            # Use efficient entropy computation
+            entropy = -(probs * torch.log(probs)).sum(dim=-1)
+            regularization_term = entropy.mean()
+
+        elif self.policy_type == 1:  # Multi-discrete actions
+            if hasattr(self, "multi_discrete"):
+                # Use efficient multi-discrete entropy computation
+                logits = self.policy_head(hidden_states)
+                self.multi_discrete.make_distribution(logits)
+                entropy = self.multi_discrete.entropy()
+                regularization_term = entropy.mean()
+            else:
+                # Fallback to discrete case
+                logits = self.policy_head(hidden_states)
+                probs = self.softmax(logits)
+                probs = torch.clamp(probs, min=1e-11, max=1)
                 entropy = -(probs * torch.log(probs)).sum(dim=-1)
                 regularization_term = entropy.mean()
 
-            elif self.policy_type == 1:  # Multi-discrete actions
-                if hasattr(self, "multi_discrete"):
-                    # Use efficient multi-discrete entropy computation
-                    logits = self.policy_head(hidden_states)
-                    self.multi_discrete.make_distribution(logits)
-                    entropy = self.multi_discrete.entropy()
-                    regularization_term = entropy.mean()
-                else:
-                    # Fallback to discrete case
-                    logits = self.policy_head(hidden_states)
-                    probs = self.softmax(logits)
-                    probs = torch.clamp(probs, min=1e-11, max=1)
-                    entropy = -(probs * torch.log(probs)).sum(dim=-1)
-                    regularization_term = entropy.mean()
+        else:  # Continuous actions
+            # For continuous actions, use policy gradient variance regularization
+            policy_output = self.policy_head(hidden_states)
+            mean, std = self.affine_map(policy_output)
 
-            else:  # Continuous actions
-                # For continuous actions, use policy gradient variance regularization
-                policy_output = self.policy_head(hidden_states)
-                mean, std = self.affine_map(policy_output)
+            # Regularize based on policy uncertainty and advantage variance
+            policy_variance = (std * std).mean()
+            advantage_variance = advantages.var()
 
-                # Regularize based on policy uncertainty and advantage variance
-                policy_variance = (std * std).mean()
-                advantage_variance = advantages.var()
-
-                regularization_term = weight * (policy_variance + advantage_variance)
+            regularization_term = policy_variance + advantage_variance
 
         return weight * regularization_term

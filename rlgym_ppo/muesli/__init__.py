@@ -13,7 +13,6 @@ from .dynamics_model import DynamicsModel
 from .reward_model import RewardModel
 from .target_networks import TargetNetworkManager
 from .muesli_policy import MuesliPolicy
-from .experience_reanalyzer import ExperienceReanalyzer
 from .retrace import RetraceEstimator, TrajectoryProcessor
 from .muesli_experience_buffer import MuesliExperienceBuffer
 
@@ -23,7 +22,6 @@ __all__ = [
     "RewardModel",
     "TargetNetworkManager",
     "MuesliPolicy",
-    "ExperienceReanalyzer",
     "RetraceEstimator",
     "TrajectoryProcessor",
     "MuesliExperienceBuffer",
