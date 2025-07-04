@@ -25,20 +25,34 @@ class MuesliExperienceBuffer(ExperienceBuffer):
         device,
         sequence_length=5,
         enable_sequential=False,
+        replay_buffer_size=100000, # Default size, can be configured
+        reanalysis_ratio=0.0, # Default to no reanalysis
     ):
         """
         Initialize the Muesli experience buffer.
 
         Args:
-            max_size (int): Maximum buffer size
+            max_size (int): Maximum buffer size for fresh experiences
             seed (int): Random seed
             device (torch.device): Device for tensor operations
             sequence_length (int): Length of sequences to collect for multi-step learning
-            enable_sequential (bool): Enable sequential data collection (can be memory intensive)
+            enable_sequential (bool): Enable sequential data collection
+            replay_buffer_size (int): Maximum size of the replay buffer for reanalysis
+            reanalysis_ratio (float): Ratio of reanalyzed to fresh experiences in batches
         """
         super().__init__(max_size, seed, device)
         self.sequence_length = sequence_length
         self.enable_sequential = enable_sequential
+
+        # Replay buffer for experience reanalysis
+        self.replay_buffer_size = replay_buffer_size
+        self.reanalysis_ratio = reanalysis_ratio
+        if self.reanalysis_ratio > 0:
+            self.replay_buffer = deque(maxlen=self.replay_buffer_size)
+            self.total_experiences_stored_for_reanalysis = 0
+            self.total_reanalysis_samples_provided = 0
+        else:
+            self.replay_buffer = None # No replay buffer if ratio is zero
 
         # Additional storage for Muesli-specific data
         self.hidden_states_buffer = deque(maxlen=max_size)
@@ -131,6 +145,40 @@ class MuesliExperienceBuffer(ExperienceBuffer):
                 advantages,
                 hidden_states,
             )
+
+        # Store experience in the replay buffer for reanalysis, if active
+        if self.replay_buffer is not None:
+            # Iterate over each transition in the batch
+            # Assuming states, actions etc. are lists/arrays of individual agent experiences
+            # or a batch tensor which needs to be iterated.
+            # For simplicity, let's assume they are already batched and we process each item.
+
+            num_transitions = len(rewards) # states, actions etc. should have same first dimension
+
+            # Convert tensors to cpu and then to numpy for storage, if they are tensors
+            # This helps in reducing GPU memory if buffer grows large and if tensors were on GPU
+            np_states = states.cpu().numpy() if isinstance(states, torch.Tensor) else np.asarray(states)
+            np_actions = actions.cpu().numpy() if isinstance(actions, torch.Tensor) else np.asarray(actions)
+            np_log_probs = log_probs.cpu().numpy() if isinstance(log_probs, torch.Tensor) else np.asarray(log_probs)
+            np_rewards = rewards.cpu().numpy() if isinstance(rewards, torch.Tensor) else np.asarray(rewards)
+            np_next_states = next_states.cpu().numpy() if isinstance(next_states, torch.Tensor) else np.asarray(next_states)
+            np_dones = dones.cpu().numpy() if isinstance(dones, torch.Tensor) else np.asarray(dones)
+            np_values = values.cpu().numpy() if isinstance(values, torch.Tensor) else np.asarray(values)
+            # hidden_states are optional and might be complex; store as is or a serializable form
+            # For now, let's assume hidden_states are numpy arrays or None
+
+            for i in range(num_transitions):
+                experience = {
+                    "state": np_states[i],
+                    "action": np_actions[i],
+                    "log_prob": np_log_probs[i],
+                    "reward": np_rewards[i],
+                    "next_state": np_next_states[i],
+                    "done": np_dones[i],
+                    "value": np_values[i], # Original value estimate at time of experience
+                }
+                self.replay_buffer.append(experience)
+                self.total_experiences_stored_for_reanalysis += 1
 
     def _collect_sequential_data(
         self,
@@ -290,6 +338,31 @@ class MuesliExperienceBuffer(ExperienceBuffer):
             print(
                 f"Sequential buffer: {len(self.completed_sequences)} sequences stored"
             )
+
+    def _sample_for_reanalysis(self, num_samples: int) -> list[dict]:
+        """
+        Sample experiences from the replay buffer for reanalysis.
+
+        Args:
+            num_samples (int): Number of experiences to sample.
+
+        Returns:
+            list[dict]: A list of sampled experience dictionaries.
+                        Returns an empty list if buffer is empty or not active.
+        """
+        if not self.replay_buffer or len(self.replay_buffer) == 0:
+            return []
+
+        actual_num_samples = min(num_samples, len(self.replay_buffer))
+
+        # Efficiently sample random indices using numpy's random generator unique to this buffer
+        sampled_indices = self.rng.choice(len(self.replay_buffer), size=actual_num_samples, replace=False)
+
+        sampled_experiences = [self.replay_buffer[i] for i in sampled_indices]
+
+        if hasattr(self, 'total_reanalysis_samples_provided'):
+            self.total_reanalysis_samples_provided += actual_num_samples
+        return sampled_experiences
 
     def _get_muesli_samples(self, indices):
         """

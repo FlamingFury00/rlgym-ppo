@@ -522,6 +522,8 @@ if __name__ == "__main__":
         #   Higher: More sample efficiency, more computation
         #   Lower: Faster training, less sample efficiency
         #   Range: 0.2 - 0.8
+        reanalysis_ratio=0.5,  # Fraction of reanalyzed experiences (0.0 to disable)
+        replay_buffer_size_muesli=200000, # Size of replay buffer for Muesli reanalysis (if ratio > 0)
         # =============================================================================
         # TRAINING CONTROL SETTINGS
         # =============================================================================

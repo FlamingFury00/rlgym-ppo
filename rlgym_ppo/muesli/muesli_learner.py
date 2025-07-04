@@ -53,6 +53,7 @@ class MuesliLearner:
         model_loss_weight=1.0,
         reward_loss_weight=1.0,
         conservative_weight=1.0,
+        reanalysis_ratio=0.0, # Default to no reanalysis
         use_categorical_value=False,
         use_categorical_reward=False,
     ):
@@ -82,10 +83,12 @@ class MuesliLearner:
             model_loss_weight (float): Weight for model loss
             reward_loss_weight (float): Weight for reward loss
             conservative_weight (float): Weight for conservative policy updates
+            reanalysis_ratio (float): Ratio of reanalyzed experiences to mix in.
             use_categorical_value (bool): Use categorical value representation
             use_categorical_reward (bool): Use categorical reward representation
         """
         self.device = device
+        self.reanalysis_ratio = reanalysis_ratio
         self.obs_space_size = obs_space_size
         self.action_space_size = action_space_size
         self.policy_type = policy_type
@@ -149,6 +152,9 @@ class MuesliLearner:
         # Multi-step advantage variance tracking for model learning
         self.model_advantage_vars = [0.0 for _ in range(self.n_step_unroll)]
         self.model_advantage_betas = [1.0 for _ in range(self.n_step_unroll)]
+
+        self.total_reanalyzed_samples_trained = 0
+
 
         self._print_network_info()
 
@@ -321,11 +327,61 @@ class MuesliLearner:
                 batch_iterator = self._get_regular_batch_iterator(exp_buffer)
                 # print("Using regular batch learning")  # Comment out to reduce spam
 
-            for batch in batch_iterator:
+            for fresh_batch_data in batch_iterator:
+                # fresh_batch_data is a tuple: (actions, log_probs, states, values, advantages, [rewards, next_states])
+
+                final_train_batch = list(fresh_batch_data) # Convert to list to modify
+
+                if self.reanalysis_ratio > 0 and hasattr(exp_buffer, '_sample_for_reanalysis'):
+                    # Determine number of reanalyzed samples based on the fresh batch size and ratio
+                    # Note: fresh_batch_data[0] is actions, its length gives batch size
+                    current_fresh_batch_size = fresh_batch_data[0].size(0)
+
+                    # Calculate how many reanalyzed samples to aim for in this combined batch
+                    # The total minibatch size is self.mini_batch_size.
+                    # If current_fresh_batch_size is less than self.mini_batch_size,
+                    # it implies this might be the last, smaller batch from an epoch.
+
+                    # Let's aim for reanalyzed_samples such that reanalyzed_samples / (fresh_samples + reanalyzed_samples) = ratio
+                    # reanalyzed_samples = ratio * fresh_samples / (1 - ratio)
+                    num_reanalyzed_to_sample = int( (self.reanalysis_ratio * current_fresh_batch_size) / (1.0 - self.reanalysis_ratio + 1e-9) )
+
+                    if num_reanalyzed_to_sample > 0 :
+                        old_experiences = exp_buffer._sample_for_reanalysis(num_reanalyzed_to_sample)
+                        if old_experiences:
+                            reanalyzed_data_tuple = self._reanalyze_batch_internal(old_experiences)
+                            if reanalyzed_data_tuple:
+                                self.total_reanalyzed_samples_trained += reanalyzed_data_tuple[0].size(0)
+                                # Concatenate fresh and reanalyzed data for each component of the batch
+                                # Batch tuple: (actions, log_probs, states, target_values, advantages, rewards, next_states)
+                                # The reanalyzed_data_tuple has this format.
+                                # The fresh_batch_data might have 5 or 7 elements.
+
+                                for i in range(len(reanalyzed_data_tuple)):
+                                    if i < len(final_train_batch):
+                                        final_train_batch[i] = torch.cat((final_train_batch[i], reanalyzed_data_tuple[i]), dim=0)
+                                    else: # Should not happen if fresh_batch_data has Muesli format (7 elements)
+                                        final_train_batch.append(reanalyzed_data_tuple[i])
+
+                current_batch_tuple = tuple(final_train_batch)
+
                 if sequential_learning:
-                    batch_metrics = self._train_on_sequential_batch(batch)
-                else:
-                    batch_metrics = self._train_on_batch(batch)
+                    # _train_on_sequential_batch expects a dict if it's a true sequential batch from buffer,
+                    # or a tuple if it's just the first step.
+                    # For now, reanalysis mixing is primarily designed for non-sequential batches.
+                    # Handling mixing for true sequential batches would be more complex.
+                    # So, if sequential_learning is True, we might just use the original fresh_batch_data
+                    # or ensure current_batch_tuple is correctly formatted if it's just the first step.
+                    # The current `_train_on_sequential_batch` takes the first step as a tuple.
+                    if isinstance(fresh_batch_data, dict) : # True sequential batch from buffer
+                         # TODO: Decide how to handle reanalysis for true multi-step sequence batches.
+                         # For now, pass original. This means reanalysis only applies to non-sequential part.
+                         batch_metrics = self._train_on_sequential_batch(fresh_batch_data)
+                    else: # It's the first step of a sequence, processed like a regular batch
+                         batch_metrics = self._train_on_sequential_batch(current_batch_tuple)
+
+                else: # Not sequential_learning
+                    batch_metrics = self._train_on_batch(current_batch_tuple)
 
                 # Accumulate metrics
                 for key, value in batch_metrics.items():
@@ -386,7 +442,17 @@ class MuesliLearner:
             "Reward Loss": metrics.get("reward_loss", 0.0),
             "Total Loss": metrics.get("total_loss", 0.0),
             "Policy Loss": metrics.get("policy_loss", 0.0),
+            "Reanalyzed Samples Trained": self.total_reanalyzed_samples_trained,
+            "Reanalysis Ratio Setting": self.reanalysis_ratio,
         }
+
+        if hasattr(exp_buffer, 'replay_buffer') and exp_buffer.replay_buffer is not None:
+            additional_metrics["Replay Buffer Size (Reanalysis)"] = len(exp_buffer.replay_buffer)
+            if hasattr(exp_buffer, 'total_experiences_stored_for_reanalysis'):
+                 additional_metrics["Total Stored for Reanalysis"] = exp_buffer.total_experiences_stored_for_reanalysis
+            if hasattr(exp_buffer, 'total_reanalysis_samples_provided'):
+                 additional_metrics["Total Sampled for Reanalysis"] = exp_buffer.total_reanalysis_samples_provided
+
 
         for key, value in additional_metrics.items():
             metrics[key] = value
@@ -394,6 +460,146 @@ class MuesliLearner:
         self.cumulative_model_updates += n_iterations
 
         return metrics
+
+    def _recompute_n_step_values_internal(
+        self,
+        initial_hidden_states: torch.Tensor,
+        policy_model: MuesliPolicy,
+        dynamics_model: DynamicsModel,
+        reward_model: RewardModel,
+        value_model: nn.Module, # Can be prediction_head or policy.value_head
+        n_step_unroll: int,
+        gamma: float
+    ) -> torch.Tensor:
+        """
+        Recomputes n-step values via model-based rollouts from initial_hidden_states.
+        Uses current policy for actions, and current dynamics/reward models.
+        """
+        batch_size = initial_hidden_states.size(0)
+        device = initial_hidden_states.device
+
+        n_step_values = torch.zeros(batch_size, device=device)
+        current_rollout_hidden_state = initial_hidden_states
+        current_discount = 1.0
+
+        with torch.no_grad(): # Rollouts are for target computation, no gradients through them
+            for k in range(n_step_unroll):
+                # Select action using current policy
+                # .get_action might return action on CPU, ensure it's on correct device
+                action_obj, _ = policy_model.get_action(current_rollout_hidden_state, deterministic=True)
+                rollout_action = action_obj.to(device)
+
+                # Reshape action if necessary (based on policy type)
+                if len(rollout_action.shape) == 1 and policy_model.policy_type != 0: # Continuous or MultiDiscrete might need unsqueeze
+                    if policy_model.action_space_size > 1 or policy_model.policy_type == 2:
+                            rollout_action = rollout_action.unsqueeze(-1)
+                elif len(rollout_action.shape) == 0 and policy_model.policy_type == 0: # Discrete action
+                            rollout_action = rollout_action.unsqueeze(-1).float() # Ensure float for model
+                elif policy_model.policy_type == 0: # Discrete action, ensure float
+                    rollout_action = rollout_action.float()
+
+
+                # Predict reward and next state using current models
+                predicted_reward_dist = reward_model(current_rollout_hidden_state, rollout_action)
+                if hasattr(reward_model, "categorical_to_scalar"):
+                    predicted_reward_scalar = reward_model.categorical_to_scalar(predicted_reward_dist)
+                else:
+                    predicted_reward_scalar = predicted_reward_dist # Assumes scalar output
+
+                next_rollout_hidden_state = dynamics_model(current_rollout_hidden_state, rollout_action)
+
+                n_step_values += current_discount * predicted_reward_scalar
+                current_rollout_hidden_state = next_rollout_hidden_state
+                current_discount *= gamma
+
+            # Bootstrap with the final state value from the value_model
+            final_value_dist = value_model(current_rollout_hidden_state)
+            if hasattr(value_model, "categorical_to_scalar"): # Check if value_model is categorical
+                final_value_scalar = value_model.categorical_to_scalar(final_value_dist)
+            elif hasattr(value_model, "value_head") and hasattr(value_model.value_head, "categorical_to_scalar"): # If it's MuesliPolicy
+                 final_value_scalar = value_model.value_head.categorical_to_scalar(final_value_dist)
+            else: # Assumes scalar output
+                final_value_scalar = final_value_dist.squeeze(-1) if len(final_value_dist.shape) > 1 else final_value_dist
+
+
+            n_step_values += current_discount * final_value_scalar
+
+        return n_step_values
+
+    def _reanalyze_batch_internal(self, experience_batch: list[dict]):
+        """
+        Reanalyzes a batch of old experiences using current models.
+        Args:
+            experience_batch: A list of experience dictionaries from the replay buffer.
+        Returns:
+            A tuple (states, actions, new_log_probs, new_target_values, new_advantages, rewards, next_states)
+            ready for training, or None if input is empty.
+        """
+        if not experience_batch:
+            return None
+
+        # Convert list of dicts to dict of lists, then to tensors
+        # This matches the structure of data stored by MuesliExperienceBuffer.submit_experience
+        # Keys: "state", "action", "log_prob", "reward", "next_state", "done", "value"
+
+        states_np = np.array([exp["state"] for exp in experience_batch])
+        actions_np = np.array([exp["action"] for exp in experience_batch])
+        old_log_probs_np = np.array([exp["log_prob"] for exp in experience_batch])
+        rewards_np = np.array([exp["reward"] for exp in experience_batch])
+        next_states_np = np.array([exp["next_state"] for exp in experience_batch])
+        dones_np = np.array([exp["done"] for exp in experience_batch])
+        # old_values_np = np.array([exp["value"] for exp in experience_batch]) # Original value
+
+        # Convert to tensors
+        states = torch.as_tensor(states_np, dtype=torch.float32, device=self.device)
+        actions = torch.as_tensor(actions_np, dtype=torch.float32, device=self.device)
+        # old_log_probs = torch.as_tensor(old_log_probs_np, dtype=torch.float32, device=self.device)
+        rewards = torch.as_tensor(rewards_np, dtype=torch.float32, device=self.device)
+        next_states = torch.as_tensor(next_states_np, dtype=torch.float32, device=self.device)
+        # dones = torch.as_tensor(dones_np, dtype=torch.bool, device=self.device)
+        # old_values = torch.as_tensor(old_values_np, dtype=torch.float32, device=self.device)
+
+        with torch.no_grad():
+            # 1. Recompute hidden states using current policy's representation model
+            # Assuming states are raw observations
+            hidden_states = self.policy.get_hidden_state(states)
+
+            # 2. Recompute n-step target values using model rollouts
+            # Using self.prediction_head as the value_model for hidden states
+            new_target_values = self._recompute_n_step_values_internal(
+                initial_hidden_states=hidden_states,
+                policy_model=self.policy,
+                dynamics_model=self.dynamics_model,
+                reward_model=self.reward_model,
+                value_model=self.prediction_head,
+                n_step_unroll=self.n_step_unroll,
+                gamma=0.99 # Assuming gamma, could be self.gamma if defined for PPO part
+            )
+
+            # 3. Recompute advantages
+            #    For simplicity, using recomputed target values and current value prediction from policy's value head
+            #    (as this is what PPO loss would typically use for current values)
+            _, _, current_values_for_advantage, _ = self.policy.get_action_log_prob_and_entropy(states, actions)
+            # Ensure current_values_for_advantage is correctly shaped like new_target_values
+            if len(current_values_for_advantage.shape) == 0 or current_values_for_advantage.shape[0] != new_target_values.shape[0]:
+                 current_values_for_advantage = current_values_for_advantage.unsqueeze(-1) if len(current_values_for_advantage.shape) == 0 else current_values_for_advantage
+                 current_values_for_advantage = current_values_for_advantage.expand_as(new_target_values)
+
+
+            new_advantages = new_target_values - current_values_for_advantage.detach()
+            # Normalize advantages (optional, but often done)
+            new_advantages = (new_advantages - new_advantages.mean()) / (new_advantages.std() + 1e-8)
+
+
+            # 4. Get updated log probabilities from the current policy
+            new_log_probs, _, _, _ = self.policy.get_action_log_prob_and_entropy(states, actions)
+
+        # Return in the same format as _get_muesli_samples from the buffer for training
+        # (actions, log_probs, states, values (targets), advantages, rewards, next_states)
+        # Note: 'rewards' and 'next_states' here are the original historical ones, not re-predicted.
+        # This is because the policy loss uses them for context but doesn't learn from them directly.
+        return actions, new_log_probs, states, new_target_values, new_advantages, rewards, next_states
+
 
     def _train_on_batch(self, batch):
         """
