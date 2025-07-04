@@ -23,7 +23,6 @@ class MuesliExperienceBuffer(ExperienceBuffer):
         max_size,
         seed,
         device,
-        reanalyzer=None,
         sequence_length=5,
         enable_sequential=False,
     ):
@@ -34,18 +33,15 @@ class MuesliExperienceBuffer(ExperienceBuffer):
             max_size (int): Maximum buffer size
             seed (int): Random seed
             device (torch.device): Device for tensor operations
-            reanalyzer (ExperienceReanalyzer): Optional experience reanalyzer
             sequence_length (int): Length of sequences to collect for multi-step learning
             enable_sequential (bool): Enable sequential data collection (can be memory intensive)
         """
         super().__init__(max_size, seed, device)
-        self.reanalyzer = reanalyzer
         self.sequence_length = sequence_length
         self.enable_sequential = enable_sequential
 
         # Additional storage for Muesli-specific data
         self.hidden_states_buffer = deque(maxlen=max_size)
-        self.trajectory_buffer = deque(maxlen=max_size // 10)  # Store trajectories
 
         # Sequential data storage for multi-step learning (only if enabled)
         if self.enable_sequential:
@@ -134,12 +130,6 @@ class MuesliExperienceBuffer(ExperienceBuffer):
                 values,
                 advantages,
                 hidden_states,
-            )
-
-        # Store experience in reanalyzer if available
-        if self.reanalyzer is not None:
-            self.reanalyzer.store_experience(
-                states, actions, rewards, next_states, dones, values, log_probs
             )
 
     def _collect_sequential_data(
@@ -458,152 +448,10 @@ class MuesliExperienceBuffer(ExperienceBuffer):
 
         return batch_data
 
-    def get_reanalyzed_batch(
-        self, batch_size, dynamics_model, reward_model, value_model, policy_model
-    ):
-        """
-        Get a batch with reanalyzed experiences mixed in.
-
-        Args:
-            batch_size (int): Size of batch to generate
-            dynamics_model: Current dynamics model
-            reward_model: Current reward model
-            value_model: Current value model
-            policy_model: Current policy model
-
-        Returns:
-            generator: Batches with mixed fresh and reanalyzed experiences
-        """
-        if self.reanalyzer is None:
-            # Fallback to normal batches
-            yield from self.get_all_batches_shuffled(batch_size)
-            return
-
-        # Get reanalysis ratio
-        reanalysis_ratio = self.reanalyzer.reanalysis_ratio
-        reanalyzed_size = int(batch_size * reanalysis_ratio)
-        fresh_size = batch_size - reanalyzed_size
-
-        total_samples = len(self.buffer)
-        if total_samples == 0:
-            return
-
-        indices = np.arange(total_samples)
-        self.rng.shuffle(indices)
-
-        for start_idx in range(0, total_samples, fresh_size):
-            # Get fresh experiences
-            fresh_indices = indices[start_idx : start_idx + fresh_size]
-            if len(fresh_indices) == 0:
-                break
-
-            fresh_batch = self._get_samples(fresh_indices)
-
-            # Get reanalyzed experiences if available
-            if reanalyzed_size > 0 and len(self.reanalyzer.replay_buffer) > 0:
-                reanalyzed_experiences = (
-                    self.reanalyzer.sample_experiences_for_reanalysis(reanalyzed_size)
-                )
-
-                if reanalyzed_experiences:
-                    reanalyzed_data = self.reanalyzer.reanalyze_experiences(
-                        reanalyzed_experiences,
-                        dynamics_model,
-                        reward_model,
-                        value_model,
-                        policy_model,
-                    )
-
-                    if reanalyzed_data:
-                        # Combine fresh and reanalyzed data
-                        combined_batch = self._combine_batches(
-                            fresh_batch, reanalyzed_data
-                        )
-                        yield combined_batch
-                        continue
-
-            # If no reanalyzed data available, yield fresh batch
-            yield fresh_batch
-
-    def _combine_batches(self, fresh_batch, reanalyzed_data):
-        """
-        Combine fresh and reanalyzed batches.
-
-        Args:
-            fresh_batch: Fresh experience batch
-            reanalyzed_data: Reanalyzed experience data
-
-        Returns:
-            tuple: Combined batch
-        """
-        actions, log_probs, states, values, advantages = fresh_batch
-
-        # Extract reanalyzed data
-        r_states = reanalyzed_data["states"]
-        r_actions = reanalyzed_data["actions"]
-        r_log_probs = reanalyzed_data["log_probs"]
-        r_values = reanalyzed_data["values"]
-        r_advantages = reanalyzed_data["advantages"]
-
-        # Concatenate tensors
-        combined_actions = torch.cat([actions, r_actions], dim=0)
-        combined_log_probs = torch.cat([log_probs, r_log_probs], dim=0)
-        combined_states = torch.cat([states, r_states], dim=0)
-        combined_values = torch.cat([values, r_values], dim=0)
-        combined_advantages = torch.cat([advantages, r_advantages], dim=0)
-
-        return (
-            combined_actions,
-            combined_log_probs,
-            combined_states,
-            combined_values,
-            combined_advantages,
-        )
-
-    def get_trajectory_data(self, trajectory_length=5):
-        """
-        Get sequential trajectory data for model learning.
-
-        Args:
-            trajectory_length (int): Length of trajectories to extract
-
-        Returns:
-            list: List of trajectory dictionaries
-        """
-        trajectories = []
-
-        if len(self.buffer) < trajectory_length:
-            return trajectories
-
-        # Extract sequential trajectories
-        for i in range(len(self.buffer) - trajectory_length + 1):
-            trajectory = []
-
-            for j in range(trajectory_length):
-                experience = self.buffer[i + j]
-                trajectory.append(
-                    {
-                        "state": experience[0],
-                        "action": experience[1],
-                        "log_prob": experience[2],
-                        "reward": experience[3],
-                        "next_state": experience[4],
-                        "done": experience[5],
-                        "truncated": experience[6],
-                        "value": experience[7],
-                        "advantage": experience[8],
-                    }
-                )
-
-            trajectories.append(trajectory)
-
-        return trajectories
-
     def clear(self):
         """Clear all buffers including sequential data."""
         super().clear()
         self.hidden_states_buffer.clear()
-        self.trajectory_buffer.clear()
         if self.enable_sequential and self.current_episode_data is not None:
             self.current_episode_data.clear()
         if self.enable_sequential and self.completed_sequences is not None:
